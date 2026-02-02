@@ -1,5 +1,7 @@
 # Build stage for vSphere provider (pure Go, no CGO)
-FROM golang:1.25-bookworm AS builder
+ARG BUILDER_IMAGE=golang:1.25-bookworm
+ARG BASE_IMAGE=debian:bookworm-slim
+FROM ${BUILDER_IMAGE} AS builder
 
 WORKDIR /workspace
 
@@ -9,7 +11,20 @@ COPY go.sum go.sum
 COPY proto/ proto/
 COPY sdk/ sdk/
 
-# Download dependencies (now that local modules are available)
+ARG GOPROXY=""
+ENV GOPROXY=${GOPROXY}
+ARG GOINSECURE=""
+ENV GOINSECURE=${GOINSECURE}
+ARG GOPRIVATE=""
+ENV GOPRIVATE=${GOPRIVATE}
+ARG GOSUMDB="sum.golang.org"
+ENV GOSUMDB=${GOSUMDB}
+
+COPY *.crt /etc/ssl/certs/
+RUN update-ca-certificates
+
+# cache deps before building and copying source so that we don't need to re-download as much
+# and so that source changes don't invalidate our downloaded layer
 RUN go mod download
 
 # Copy source code
@@ -30,7 +45,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -a -o provider-vsphere cmd/provider-vsphere/main.go
 
 # Runtime stage - use Debian slim for qemu-img support
-FROM debian:bookworm-slim
+FROM ${BASE_IMAGE} as runtime
 
 # Install qemu-img and CA certificates
 RUN apt-get update && apt-get install -y \

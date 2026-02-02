@@ -1,5 +1,7 @@
 # Build stage with CGO support for libvirt
-FROM golang:1.25-bookworm AS builder
+ARG BUILDER_IMAGE=golang:1.25-bookworm
+ARG BASE_IMAGE=debian:bookworm-slim
+FROM ${BUILDER_IMAGE} AS builder
 
 # Install libvirt development libraries and SSH client
 RUN apt-get update && apt-get install -y \
@@ -18,6 +20,18 @@ COPY go.sum go.sum
 COPY sdk/ sdk/
 COPY proto/ proto/
 
+ARG GOPROXY=""
+ENV GOPROXY=${GOPROXY}
+ARG GOINSECURE=""
+ENV GOINSECURE=${GOINSECURE}
+ARG GOPRIVATE=""
+ENV GOPRIVATE=${GOPRIVATE}
+ARG GOSUMDB="sum.golang.org"
+ENV GOSUMDB=${GOSUMDB}
+
+COPY *.crt /etc/ssl/certs/
+RUN update-ca-certificates
+
 # Download dependencies (now that local modules are available)
 RUN go mod download
 
@@ -30,7 +44,7 @@ COPY proto/ proto/
 # Protobuf files are already generated in proto/rpc/
 # No need to regenerate them during Docker build
 
-# Build the provider binary  
+# Build the provider binary
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
@@ -40,7 +54,7 @@ RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -a -o provider-libvirt cmd/provider-libvirt/main.go
 
 # Runtime stage with compatible libvirt and SSH client + SSH agent
-FROM debian:bookworm-slim
+FROM ${BASE_IMAGE}
 RUN apt-get update && apt-get install -y \
     libvirt0 \
     libvirt-clients \

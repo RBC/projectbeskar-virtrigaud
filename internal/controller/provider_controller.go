@@ -449,6 +449,22 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 		Value: fmt.Sprintf("%t", provider.Spec.InsecureSkipVerify),
 	})
 
+	// Add log level from spec.runtime.logLevel if specified
+	if provider.Spec.Runtime.LogLevel != "" {
+		env = append(env, corev1.EnvVar{
+			Name:  "LOG_LEVEL",
+			Value: provider.Spec.Runtime.LogLevel,
+		})
+	}
+
+	// Add log format from spec.runtime.logFormat if specified
+	if provider.Spec.Runtime.LogFormat != "" {
+		env = append(env, corev1.EnvVar{
+			Name:  "LOG_FORMAT",
+			Value: provider.Spec.Runtime.LogFormat,
+		})
+	}
+
 	// Add custom environment variables
 	if provider.Spec.Runtime.Env != nil {
 		env = append(env, provider.Spec.Runtime.Env...)

@@ -85,7 +85,8 @@ type ProviderRuntimeSpec struct {
 	Mode ProviderRuntimeMode `json:"mode,omitempty"`
 
 	// Image is the container image for remote providers (required)
-	// +kubebuilder:validation:Pattern="^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$"
+	// Supports formats: image:tag, image@digest, or image:tag@digest
+	// +kubebuilder:validation:Pattern="^[a-zA-Z0-9._/-]+(:[a-zA-Z0-9._-]+)?(@[a-zA-Z0-9]+:[a-fA-F0-9]{64})?$"
 	Image string `json:"image"`
 
 	// ImagePullPolicy defines the image pull policy
@@ -130,6 +131,19 @@ type ProviderRuntimeSpec struct {
 	// SecurityContext defines security context for provider pods
 	// +optional
 	SecurityContext *corev1.SecurityContext `json:"securityContext,omitempty"`
+
+	// LogLevel sets the log level for provider pods
+	// Defaults to the controller's log level if not specified
+	// +optional
+	// +kubebuilder:validation:Enum=debug;info;warn;error
+	// +kubebuilder:default="info"
+	LogLevel string `json:"logLevel,omitempty"`
+
+	// LogFormat sets the log format for provider pods
+	// +optional
+	// +kubebuilder:validation:Enum=text;json
+	// +kubebuilder:default="text"
+	LogFormat string `json:"logFormat,omitempty"`
 
 	// Env defines additional environment variables for provider pods
 	// +optional
