@@ -96,25 +96,25 @@ git commit -m "Add new field to VirtualMachine spec"
 #### **Manual Workflow** (If hooks not installed):
 
 1. Edit Go types in `api/infra.virtrigaud.io/v1beta1/*_types.go`
-2. Run `make update-crds` to regenerate everything at once
-   - Or run individually: `make generate manifests sync-helm-crds`
+2. Regenerate code and CRDs:
+   - `make generate` - Generate Go code
+   - `make gen-crds` - Generate CRDs for config directory
 3. **CRITICAL**: Update examples in `/docs/examples/` to match new schema
 4. **CRITICAL**: Update documentation in `/docs/` that references the CRDs
 5. Validate all examples: `kubectl apply --dry-run=client -f docs/examples/`
 6. Run `make fmt lint test` to ensure code quality
 7. Deploy with `make install`
 
-#### **Verification Commands:**
+#### **CRD Generation Commands:**
 
 ```bash
-# Verify CRDs are in sync with Go types
-make verify-crd-sync
+# Generate CRDs for local development (config/crd/bases/)
+make gen-crds
 
-# Verify Helm chart CRDs match generated CRDs
-make verify-helm-crds
+# Generate CRDs for Helm chart (charts/virtrigaud/crds/)
+make gen-helm-crds
 
-# Regenerate everything (use after modifying *_types.go)
-make update-crds
+# Note: Helm chart CRDs are generated during packaging and not checked into git
 ```
 
 #### **CI/CD Protection:**

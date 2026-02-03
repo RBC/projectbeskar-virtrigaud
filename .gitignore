@@ -38,6 +38,9 @@ go.work
 dist/
 *.tgz
 
+# Generated CRDs for Helm chart (generated via make gen-helm-crds)
+charts/virtrigaud/crds/*.yaml
+
 # Development files
 libvirtVM.yaml
 libvirtVM-corrected.yaml

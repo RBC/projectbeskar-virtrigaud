@@ -38,12 +38,9 @@ When modifying API types:
 # Edit API types
 vim api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go
 
-# Generate code and sync CRDs
+# Generate code and CRDs
 make generate
-make sync-helm-crds
-
-# Verify everything is in sync
-make verify-helm-crds
+make gen-crds
 ```
 
 #### Code Changes
@@ -62,14 +59,17 @@ make fmt
 
 ### 2. CRD Management
 
-**Important**: Always keep CRDs synchronized between `config/crd/bases/` and `charts/virtrigaud/crds/`.
+**Important**: CRDs are generated from code (the source of truth) and are not duplicated in git.
+
+- `config/crd/bases/` - CRDs for local development and releases (checked into git)
+- `charts/virtrigaud/crds/` - CRDs for Helm charts (generated during packaging, not checked into git)
 
 ```bash
-# After API changes, sync CRDs to Helm chart
-make sync-helm-crds
+# After API changes, generate CRDs
+make gen-crds
 
-# Verify sync before committing
-make verify-helm-crds
+# For Helm chart development/packaging
+make gen-helm-crds
 ```
 
 ### 3. Testing
@@ -210,12 +210,12 @@ make test-provider-proxmox
 
 1. **Prepare release**:
    ```bash
-   # Ensure CRDs are synced
-   make sync-helm-crds
-   
+   # Generate CRDs for config directory (will be in release artifacts)
+   make gen-crds
+
    # Update version in charts
    vim charts/virtrigaud/Chart.yaml
-   
+
    # Update changelog
    vim CHANGELOG.md
    ```
@@ -234,17 +234,19 @@ make test-provider-proxmox
 
 ## Common Issues
 
-### CRD Sync Issues
+### CRD Generation Issues
 
-If you see "Helm chart CRDs are out of sync":
+If you need to regenerate CRDs:
 
 ```bash
-# Fix with
-make sync-helm-crds
+# For local development and config directory
+make gen-crds
 
-# Verify
-make verify-helm-crds
+# For Helm chart packaging
+make gen-helm-crds
 ```
+
+Note: CRDs in `charts/virtrigaud/crds/` are generated during packaging and should not be committed to git.
 
 ### Test Failures
 

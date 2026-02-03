@@ -106,14 +106,14 @@ func main() {
 // getLogLevel returns the log level from LOG_LEVEL environment variable.
 // Supported values: debug, warn, error, info (default)
 func getLogLevel() slog.Level {
-switch os.Getenv("LOG_LEVEL") {
-case "debug":
-return slog.LevelDebug
-case "warn":
-return slog.LevelWarn
-case "error":
-return slog.LevelError
-default:
-return slog.LevelInfo
-}
+	switch os.Getenv("LOG_LEVEL") {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }
