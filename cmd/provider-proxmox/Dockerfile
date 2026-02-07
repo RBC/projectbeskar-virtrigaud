@@ -1,5 +1,7 @@
 # Build the provider binary
-FROM --platform=${BUILDPLATFORM:-linux/amd64} golang:1.25 as builder
+ARG BUILDER_IMAGE=golang:1.25
+ARG BASE_IMAGE=gcr.io/distroless/static:nonroot
+FROM --platform=${BUILDPLATFORM:-linux/amd64} ${BUILDER_IMAGE} as builder
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
 ARG VERSION="dev"
@@ -11,6 +13,19 @@ COPY go.mod go.mod
 COPY go.sum go.sum
 COPY sdk/ sdk/
 COPY proto/ proto/
+
+ARG GOPROXY=""
+ENV GOPROXY=${GOPROXY}
+ARG GOINSECURE=""
+ENV GOINSECURE=${GOINSECURE}
+ARG GOPRIVATE=""
+ENV GOPRIVATE=${GOPRIVATE}
+ARG GOSUMDB="sum.golang.org"
+ENV GOSUMDB=${GOSUMDB}
+
+COPY *.crt /etc/ssl/certs/
+RUN update-ca-certificates
+
 # cache deps before building and copying source so that we don't need to re-download as much
 # and so that source changes don't invalidate our downloaded layer
 RUN go mod download
@@ -26,7 +41,7 @@ COPY api/ api/
 # the docker BUILDPLATFORM arg will be linux/arm64 when for Apple x86 it will be linux/amd64. Therefore,
 # by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
 ARG CGO_ENABLED=0
-ARG GOOS=linux 
+ARG GOOS=linux
 ARG GOARCH
 RUN CGO_ENABLED=${CGO_ENABLED} GOOS=${GOOS} GOARCH=${GOARCH} go build \
     -ldflags="-X 'github.com/projectbeskar/virtrigaud/internal/version.Version=${VERSION}' -X 'github.com/projectbeskar/virtrigaud/internal/version.GitSHA=${GIT_SHA}'" \
@@ -34,7 +49,7 @@ RUN CGO_ENABLED=${CGO_ENABLED} GOOS=${GOOS} GOARCH=${GOARCH} go build \
 
 # Use distroless as minimal base image to package the provider binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot
+FROM ${BASE_IMAGE}
 WORKDIR /
 COPY --from=builder /workspace/provider-proxmox /usr/local/bin/provider-proxmox
 USER 65532:65532

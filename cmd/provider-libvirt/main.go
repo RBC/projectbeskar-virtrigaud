@@ -20,7 +20,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -49,6 +49,20 @@ func main() {
 	flag.IntVar(&healthPort, "health-port", 8080, "Health check port")
 	flag.Parse()
 
+	// Create logger with configurable format
+	var handler slog.Handler
+	logFormat := os.Getenv("LOG_FORMAT")
+	if logFormat == "json" {
+		handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+			Level: getLogLevel(),
+		})
+	} else {
+		handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+			Level: getLogLevel(),
+		})
+	}
+	logger := slog.New(handler)
+
 	// Create context that listens for the interrupt signal from the OS
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -71,10 +85,22 @@ func main() {
 	// Start gRPC server
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
-		log.Fatalf("Failed to listen: %v", err)
+		logger.Error("Failed to listen", "error", err)
+		os.Exit(1)
 	}
 
-	log.Printf("Libvirt provider server %s listening on port %d", version.String(), port)
+	logger.Info("Starting Libvirt provider server",
+		"version", version.String(),
+		"log_level", getLogLevel().String(),
+		"log_format", logFormat,
+		"port", port,
+		"health_port", healthPort,
+		"capabilities", []string{
+			"core", "snapshots", "linked-clones",
+			"online-reconfigure", "qemu-guest-agent",
+		},
+		"supported_platforms", []string{"kvm", "qemu", "libvirt"},
+	)
 
 	// Create HTTP health server
 	healthMux := http.NewServeMux()
@@ -86,34 +112,51 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ready"))
 	})
-	
+
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf(":%d", healthPort),
 		Handler: healthMux,
 	}
 
-	log.Printf("Starting HTTP health server on port %d", healthPort)
+	logger.Info("Starting HTTP health server", "port", healthPort)
 
 	// Start gRPC server in a goroutine
 	go func() {
 		if err := server.Serve(lis); err != nil {
-			log.Fatalf("Failed to serve gRPC: %v", err)
+			logger.Error("Failed to serve gRPC", "error", err)
+			os.Exit(1)
 		}
 	}()
 
 	// Start HTTP health server in a goroutine
 	go func() {
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Failed to serve HTTP health server: %v", err)
+			logger.Error("Failed to serve HTTP health server", "error", err)
+			os.Exit(1)
 		}
 	}()
 
 	// Wait for interrupt signal to gracefully shutdown the server
 	<-ctx.Done()
 
-	log.Println("Shutting down gRPC server...")
+	logger.Info("Shutting down gRPC server...")
 	server.GracefulStop()
-	
-	log.Println("Shutting down HTTP health server...")
+
+	logger.Info("Shutting down HTTP health server...")
 	_ = httpServer.Shutdown(context.Background())
+}
+
+// getLogLevel returns the log level from LOG_LEVEL environment variable.
+// Supported values: debug, warn, error, info (default)
+func getLogLevel() slog.Level {
+	switch os.Getenv("LOG_LEVEL") {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }

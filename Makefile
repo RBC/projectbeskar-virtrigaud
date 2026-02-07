@@ -1,5 +1,5 @@
 # Image URL to use all building/pushing image targets
-IMG ?= controller:latest
+CONTROLLER_IMG ?= controller:latest
 PROVIDER_LIBVIRT_IMG ?= ghcr.io/projectbeskar/virtrigaud/provider-libvirt:latest
 PROVIDER_VSPHERE_IMG ?= ghcr.io/projectbeskar/virtrigaud/provider-vsphere:latest
 PROVIDER_PROXMOX_IMG ?= ghcr.io/projectbeskar/virtrigaud/provider-proxmox:latest
@@ -8,6 +8,16 @@ TAG ?= latest
 # Platform configuration for multi-arch builds
 PLATFORM ?= linux/amd64
 BUILD_PLATFORMS ?= linux/arm64,linux/amd64
+
+# Base images for building containers
+BUILDER_IMAGE ?= golang:1.25
+BASE_IMAGE ?= gcr.io/distroless/static:nonroot
+
+# Go module proxy configuration
+GOPROXY ?=
+GOINSECURE ?=
+GOPRIVATE ?=
+GOSUMDB ?= sum.golang.org
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -109,14 +119,6 @@ dev-cleanup: ## Clean up development deployment
 .PHONY: dev-watch
 dev-watch: ## Watch for file changes and auto-reload (requires fswatch or inotify-tools)
 	./hack/dev-watch.sh watch
-
-.PHONY: lint
-lint: golangci-lint ## Run golangci-lint linter & fix issues.
-	$(GOLANGCI_LINT) run ./... --fix
-
-.PHONY: lint-check
-lint-check: golangci-lint ## Run golangci-lint linter without fixes.
-	$(GOLANGCI_LINT) run ./...
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -277,19 +279,25 @@ release-sdk: ## Release SDK module with tags and generate docs
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
-# 
+#
 # Examples:
 #   make docker-build                                    # Build for linux/amd64 (default)
 #   make docker-build PLATFORM=linux/arm64              # Build for ARM64
 #   make docker-build-multiplatform                      # Build and load for linux/amd64,linux/arm64
 #   make docker-buildx BUILD_PLATFORMS=linux/arm64,linux/amd64  # Build and push for multiple platforms
 .PHONY: docker-build
-docker-build: ## Build docker image with the manager for single platform
-	$(CONTAINER_TOOL) build --platform $(PLATFORM) -t ${IMG} \
+docker-build: ## Build docker image with the manager.
+	$(CONTAINER_TOOL) build --platform $(PLATFORM) -t ${CONTROLLER_IMG} \
 		--build-arg VERSION=$(VERSION) \
 		--build-arg GIT_SHA=$(GIT_SHA) \
 		--build-arg TARGETOS=$(shell echo $(PLATFORM) | cut -d'/' -f1) \
 		--build-arg TARGETARCH=$(shell echo $(PLATFORM) | cut -d'/' -f2) \
+		--build-arg BUILDER_IMAGE=$(BUILDER_IMAGE) \
+		--build-arg BASE_IMAGE=$(BASE_IMAGE) \
+		--build-arg GOPROXY=$(GOPROXY) \
+		--build-arg GOINSECURE=$(GOINSECURE) \
+		--build-arg GOPRIVATE=$(GOPRIVATE) \
+		--build-arg GOSUMDB=$(GOSUMDB) \
 		.
 
 .PHONY: docker-build-multiplatform
@@ -302,33 +310,51 @@ docker-build-multiplatform: ## Build docker image for multiple platforms (withou
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
-	$(CONTAINER_TOOL) push ${IMG}
+	$(CONTAINER_TOOL) push ${CONTROLLER_IMG}
 
 .PHONY: docker-provider-libvirt
 docker-provider-libvirt: ## Build docker image for libvirt provider
 	$(CONTAINER_TOOL) build --platform $(PLATFORM) -f cmd/provider-libvirt/Dockerfile -t $(PROVIDER_LIBVIRT_IMG) \
-		--build-arg VERSION=$(VERSION) \
-		--build-arg GIT_SHA=$(GIT_SHA) \
-		--build-arg TARGETOS=$(shell echo $(PLATFORM) | cut -d'/' -f1) \
-		--build-arg TARGETARCH=$(shell echo $(PLATFORM) | cut -d'/' -f2) \
+		--build-arg VERSION="$(VERSION)" \
+		--build-arg GIT_SHA="$(GIT_SHA)" \
+		--build-arg TARGETOS="$(shell echo $(PLATFORM) | cut -d'/' -f1)" \
+		--build-arg TARGETARCH="$(shell echo $(PLATFORM) | cut -d'/' -f2)" \
+		--build-arg BUILDER_IMAGE="$(BUILDER_IMAGE)" \
+		--build-arg BASE_IMAGE="$(BASE_IMAGE)" \
+		--build-arg GOPROXY="$(GOPROXY)" \
+		--build-arg GOINSECURE="$(GOINSECURE)" \
+		--build-arg GOPRIVATE="$(GOPRIVATE)" \
+		--build-arg GOSUMDB="$(GOSUMDB)" \
 		.
 
 .PHONY: docker-provider-vsphere
 docker-provider-vsphere: ## Build docker image for vsphere provider
 	$(CONTAINER_TOOL) build --platform $(PLATFORM) -f cmd/provider-vsphere/Dockerfile -t $(PROVIDER_VSPHERE_IMG) \
-		--build-arg VERSION=$(VERSION) \
-		--build-arg GIT_SHA=$(GIT_SHA) \
-		--build-arg TARGETOS=$(shell echo $(PLATFORM) | cut -d'/' -f1) \
-		--build-arg TARGETARCH=$(shell echo $(PLATFORM) | cut -d'/' -f2) \
+		--build-arg VERSION="$(VERSION)" \
+		--build-arg GIT_SHA="$(GIT_SHA)" \
+		--build-arg TARGETOS="$(shell echo $(PLATFORM) | cut -d'/' -f1)" \
+		--build-arg TARGETARCH="$(shell echo $(PLATFORM) | cut -d'/' -f2)" \
+		--build-arg BUILDER_IMAGE="$(BUILDER_IMAGE)" \
+		--build-arg BASE_IMAGE="$(BASE_IMAGE)" \
+		--build-arg GOPROXY="$(GOPROXY)" \
+		--build-arg GOINSECURE="$(GOINSECURE)" \
+		--build-arg GOPRIVATE="$(GOPRIVATE)" \
+		--build-arg GOSUMDB="$(GOSUMDB)" \
 		.
 
 .PHONY: docker-provider-proxmox
 docker-provider-proxmox: ## Build docker image for proxmox provider
 	$(CONTAINER_TOOL) build --platform $(PLATFORM) -f cmd/provider-proxmox/Dockerfile -t $(PROVIDER_PROXMOX_IMG) \
-		--build-arg VERSION=$(VERSION) \
-		--build-arg GIT_SHA=$(GIT_SHA) \
-		--build-arg TARGETOS=$(shell echo $(PLATFORM) | cut -d'/' -f1) \
-		--build-arg TARGETARCH=$(shell echo $(PLATFORM) | cut -d'/' -f2) \
+		--build-arg VERSION="$(VERSION)" \
+		--build-arg GIT_SHA="$(GIT_SHA)" \
+		--build-arg TARGETOS="$(shell echo $(PLATFORM) | cut -d'/' -f1)" \
+		--build-arg TARGETARCH="$(shell echo $(PLATFORM) | cut -d'/' -f2)" \
+		--build-arg BUILDER_IMAGE="$(BUILDER_IMAGE)" \
+		--build-arg BASE_IMAGE="$(BASE_IMAGE)" \
+		--build-arg GOPROXY="$(GOPROXY)" \
+		--build-arg GOINSECURE="$(GOINSECURE)" \
+		--build-arg GOPRIVATE="$(GOPRIVATE)" \
+		--build-arg GOSUMDB="$(GOSUMDB)" \
 		.
 
 .PHONY: docker-providers
@@ -365,10 +391,10 @@ docker-provider-proxmox-multiplatform: ## Build proxmox provider for multiple pl
 		.
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
-# architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
+# architectures. (i.e. make docker-buildx CONTROLLER_IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
 # - be able to use docker buildx. More info: https://docs.docker.com/build/buildx/
 # - have enabled BuildKit. More info: https://docs.docker.com/develop/develop-images/build_enhancements/
-# - be able to push the image to your registry (i.e. if you do not set a valid value via IMG=<myregistry/image:<tag>> then the export will fail)
+# - be able to push the image to your registry (i.e. if you do not set a valid value via CONTROLLER_IMG=<myregistry/image:<tag>> then the export will fail)
 # To adequately provide solutions that are compatible with multiple platforms, you should consider using this option.
 PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
 .PHONY: docker-buildx
@@ -377,7 +403,7 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name virtrigaud-builder
 	$(CONTAINER_TOOL) buildx use virtrigaud-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross \
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${CONTROLLER_IMG} -f Dockerfile.cross \
 		--build-arg VERSION=$(VERSION) \
 		--build-arg GIT_SHA=$(GIT_SHA) \
 		.
@@ -423,7 +449,7 @@ docker-buildx-provider-proxmox: ## Build and push proxmox provider for cross-pla
 .PHONY: build-installer
 build-installer: sync-helm-crds generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
 	mkdir -p dist
-	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
+	cd config/manager && $(KUSTOMIZE) edit set image controller=${CONTROLLER_IMG}
 	$(KUSTOMIZE) build config/default > dist/install.yaml
 
 ##@ Deployment
@@ -454,7 +480,7 @@ uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified 
 
 .PHONY: deploy
 deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
-	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
+	cd config/manager && $(KUSTOMIZE) edit set image controller=${CONTROLLER_IMG}
 	$(KUSTOMIZE) build config/default | $(KUBECTL) apply -f -
 
 .PHONY: undeploy

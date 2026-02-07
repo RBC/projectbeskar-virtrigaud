@@ -1240,9 +1240,10 @@ spec:
                     maxItems: 50
                     type: array
                   image:
-                    description: Image is the container image for remote providers
-                      (required)
-                    pattern: ^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$
+                    description: |-
+                      Image is the container image for remote providers (required)
+                      Supports formats: image:tag, image@digest, or image:tag@digest
+                    pattern: ^[a-zA-Z0-9._/-]+(:[a-zA-Z0-9._-]+)?(@[a-zA-Z0-9]+:[a-fA-F0-9]{64})?$
                     type: string
                   imagePullPolicy:
                     default: IfNotPresent
@@ -1425,6 +1426,24 @@ spec:
                         format: int32
                         type: integer
                     type: object
+                  logFormat:
+                    default: text
+                    description: LogFormat sets the log format for provider pods
+                    enum:
+                    - text
+                    - json
+                    type: string
+                  logLevel:
+                    default: info
+                    description: |-
+                      LogLevel sets the log level for provider pods
+                      Defaults to the controller's log level if not specified
+                    enum:
+                    - debug
+                    - info
+                    - warn
+                    - error
+                    type: string
                   mode:
                     default: Remote
                     description: Mode specifies the runtime mode (always Remote)

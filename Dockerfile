@@ -1,5 +1,9 @@
+ARG BUILDER_IMAGE=docker.io/golang:1.25
+ARG BASE_IMAGE=gcr.io/distroless/static:nonroot
 # Build the manager binary
-FROM docker.io/golang:1.25 AS builder
+FROM ${BUILDER_IMAGE} AS builder
+ARG BUILDER_IMAGE
+
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
@@ -11,6 +15,19 @@ COPY go.mod go.mod
 COPY go.sum go.sum
 COPY sdk/ sdk/
 COPY proto/ proto/
+
+ARG GOPROXY=""
+ENV GOPROXY=${GOPROXY}
+ARG GOINSECURE=""
+ENV GOINSECURE=${GOINSECURE}
+ARG GOPRIVATE=""
+ENV GOPRIVATE=${GOPRIVATE}
+ARG GOSUMDB="sum.golang.org"
+ENV GOSUMDB=${GOSUMDB}
+
+COPY *.crt /etc/ssl/certs/
+RUN update-ca-certificates
+
 # cache deps before building and copying source so that we don't need to re-download as much
 # and so that source changes don't invalidate our downloaded layer
 RUN go mod download
@@ -31,7 +48,8 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot
+FROM ${BASE_IMAGE}
+
 WORKDIR /
 COPY --from=builder /workspace/manager .
 USER 65532:65532

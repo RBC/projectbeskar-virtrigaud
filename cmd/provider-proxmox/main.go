@@ -42,10 +42,19 @@ func main() {
 	flag.IntVar(&healthPort, "health-port", 8080, "Health check port")
 	flag.Parse()
 
-	// Create logger
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
+	// Create logger with configurable format
+	var handler slog.Handler
+	logFormat := os.Getenv("LOG_FORMAT")
+	if logFormat == "json" {
+		handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+			Level: getLogLevel(),
+		})
+	} else {
+		handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+			Level: getLogLevel(),
+		})
+	}
+	logger := slog.New(handler)
 
 	// Create server configuration
 	config := server.DefaultConfig()
@@ -77,6 +86,8 @@ func main() {
 	// Log startup information with capabilities
 	logger.Info("Starting Proxmox VE provider server",
 		"version", version.String(),
+		"log_level", getLogLevel().String(),
+		"log_format", logFormat,
 		"capabilities", []string{
 			"core", "snapshots", "memory-snapshots", "linked-clones",
 			"online-reconfigure", "online-disk-expansion", "image-import",
@@ -90,4 +101,19 @@ func main() {
 		logger.Error("Server failed", "error", err)
 		os.Exit(1)
 	}
+}
+
+// getLogLevel returns the log level from LOG_LEVEL environment variable.
+// Supported values: debug, warn, error, info (default)
+func getLogLevel() slog.Level {
+switch os.Getenv("LOG_LEVEL") {
+case "debug":
+return slog.LevelDebug
+case "warn":
+return slog.LevelWarn
+case "error":
+return slog.LevelError
+default:
+return slog.LevelInfo
+}
 }
