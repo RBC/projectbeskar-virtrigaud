@@ -36,20 +36,13 @@ repos:
 # VirtRigaud-specific hooks
 - repo: local
   hooks:
-  - id: sync-helm-crds
-    name: Sync Helm Chart CRDs
-    entry: make sync-helm-crds
+  - id: gen-crds
+    name: Generate CRDs
+    entry: make gen-crds
     language: system
-    files: ^(api/.*\.go|config/crd/.*\.yaml)$
+    files: ^(api/.*\.go)$
     pass_filenames: false
-    
-  - id: verify-helm-crds
-    name: Verify Helm CRDs are in sync
-    entry: make verify-helm-crds
-    language: system
-    files: ^(charts/virtrigaud/crds/.*\.yaml)$
-    pass_filenames: false
-    
+
   - id: go-mod-tidy
     name: Go Mod Tidy
     entry: go mod tidy

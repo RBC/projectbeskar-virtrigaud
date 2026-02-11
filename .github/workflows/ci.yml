@@ -56,11 +56,6 @@ jobs:
         # The Makefile generates coverage in cover.out, rename it for codecov
         mv cover.out coverage.out
 
-    - name: Verify Helm CRDs are in sync
-      run: |
-        # Ensure Helm chart CRDs match generated CRDs
-        make verify-helm-crds
-
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4
       with:
@@ -208,8 +203,8 @@ jobs:
     - name: Generate code
       run: make generate
 
-    - name: Generate manifests
-      run: make manifests
+    - name: Generate CRDs
+      run: make gen-crds
 
     - name: Generate protobuf
       run: make proto

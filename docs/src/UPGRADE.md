@@ -209,26 +209,30 @@ Remember: Always test upgrades in non-production environments first!
 
 ## Development Workflow (v0.2.1+)
 
-### Automated CRD Synchronization
+### CRD Management
 
-Starting with v0.2.1, VirtRigaud includes automated tooling to ensure CRDs stay in sync between development and Helm chart deployments.
+Starting with v0.2.1+, VirtRigaud uses a single-source-of-truth approach for CRDs:
+
+- **Code** is the source of truth (API types in `api/infra.virtrigaud.io/v1beta1`)
+- **`config/crd/bases/`** contains generated CRDs for local development and is checked into git
+- **`charts/virtrigaud/crds/`** CRDs are generated during Helm chart packaging and are NOT checked into git
 
 #### For Developers
 
 ```bash
-# Generate and sync CRDs automatically
-make sync-helm-crds
+# Generate CRDs for local development
+make gen-crds
 
-# Verify CRDs are in sync
-make verify-helm-crds
+# Generate CRDs for Helm chart packaging
+make gen-helm-crds
 
-# Package Helm chart with latest CRDs
+# Package Helm chart with generated CRDs
 make helm-package
 ```
 
 #### Pre-commit Hooks
 
-Install pre-commit hooks to automatically sync CRDs:
+Install pre-commit hooks to automatically generate CRDs:
 
 ```bash
 # Install pre-commit
@@ -237,20 +241,19 @@ pip install pre-commit
 # Install hooks
 pre-commit install
 
-# CRDs will now sync automatically on commits that modify:
+# CRDs will now be generated automatically on commits that modify:
 # - api/**.go files
-# - config/crd/**.yaml files
 ```
 
 #### CI/CD Integration
 
-The CI/CD pipeline now automatically:
+The CI/CD pipeline automatically:
 
-1. **Validates CRD sync** on every pull request
-2. **Syncs CRDs** before Helm chart packaging in releases  
-3. **Fails builds** if Helm chart CRDs are out of sync
+1. **Generates CRDs** from code during builds
+2. **Includes CRDs in release artifacts** for users to download
+3. **Generates Helm chart CRDs** during packaging
 
-This prevents the v0.2.1-rc2 issue where OffGraceful validation failed due to stale Helm chart CRDs.
+This ensures CRDs are always up-to-date and not duplicated in the repository.
 
 ### Repository Workflow
 
@@ -258,13 +261,13 @@ This prevents the v0.2.1-rc2 issue where OffGraceful validation failed due to st
 # 1. Make API changes
 vim api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go
 
-# 2. Generate and sync CRDs (automated by pre-commit)
-make sync-helm-crds
+# 2. Generate CRDs (automated by pre-commit)
+make gen-crds
 
-# 3. Commit (hooks will verify sync)
+# 3. Commit changes
 git add .
 git commit -m "feat: add new VM power states"
 
-# 4. CI validates everything is in sync
+# 4. CI validates and builds with generated CRDs
 git push origin feature-branch
 ```

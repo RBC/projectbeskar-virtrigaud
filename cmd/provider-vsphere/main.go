@@ -101,6 +101,7 @@ func main() {
 		os.Exit(1)
 	}
 }
+
 // getLogLevel returns the log level from LOG_LEVEL environment variable.
 // Supported values: debug, warn, error, info (default)
 func getLogLevel() slog.Level {

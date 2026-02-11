@@ -64,33 +64,22 @@ help: ## Display this help.
 
 ##@ Development
 
-.PHONY: manifests
-manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
+.PHONY: gen-crds
+gen-crds: controller-gen ## Generate CRDs and put them in config/crd/bases
+	@echo "Generating CRDs..."
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./api/infra.virtrigaud.io/v1beta1" paths="./internal/controller/..." output:crd:artifacts:config=config/crd/bases
+	@echo "✅ CRDs generated in config/crd/bases/"
 
-.PHONY: sync-helm-crds
-sync-helm-crds: manifests ## Sync generated CRDs to Helm chart directory
-	@echo "Syncing CRDs from config/crd/bases/ to charts/virtrigaud/crds/"
-	@cp config/crd/bases/*.yaml charts/virtrigaud/crds/
-	@echo "✅ CRDs synced successfully"
+.PHONY: gen-helm-crds
+gen-helm-crds: controller-gen ## Generate CRDs directly into Helm chart directory
+	@echo "Generating CRDs for Helm chart..."
+	@mkdir -p charts/virtrigaud/crds
+	$(CONTROLLER_GEN) crd paths="./api/infra.virtrigaud.io/v1beta1" output:crd:artifacts:config=charts/virtrigaud/crds
+	@echo "✅ CRDs generated in charts/virtrigaud/crds/"
 
-.PHONY: verify-helm-crds
-verify-helm-crds: manifests ## Verify Helm chart CRDs are in sync with generated CRDs
-	@echo "Verifying Helm chart CRDs are in sync..."
-	@temp_dir=$$(mktemp -d); \
-	cp config/crd/bases/*.yaml "$$temp_dir/"; \
-	if ! diff -r "$$temp_dir" charts/virtrigaud/crds/ > /dev/null 2>&1; then \
-		echo "❌ Helm chart CRDs are out of sync with generated CRDs!"; \
-		echo "Run 'make sync-helm-crds' to fix this."; \
-		echo ""; \
-		echo "Differences:"; \
-		diff -r "$$temp_dir" charts/virtrigaud/crds/ || true; \
-		rm -rf "$$temp_dir"; \
-		exit 1; \
-	else \
-		echo "✅ Helm chart CRDs are in sync"; \
-		rm -rf "$$temp_dir"; \
-	fi
+# Alias for backwards compatibility
+.PHONY: manifests
+manifests: gen-crds
 
 .PHONY: dev-deploy
 dev-deploy: ## Deploy to local Kind cluster for development
@@ -135,7 +124,7 @@ vet: ## Run go vet against code.
 	@go list ./... | grep -v '/internal/providers/libvirt' | grep -v '/cmd/provider-libvirt' | grep -v '/test/integration' | xargs go vet
 
 .PHONY: test
-test: manifests generate fmt vet setup-envtest ## Run tests.
+test: gen-crds generate fmt vet setup-envtest ## Run tests.
 	@echo "Running tests (excluding libvirt packages)..."
 	@KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
 	go list ./... | grep -v '/internal/providers/libvirt' | grep -v '/cmd/provider-libvirt' | grep -v '/test/e2e' | grep -v '/test/integration' | \
@@ -158,7 +147,7 @@ providers-version: ## Print versions for manager and all providers
 # CertManager is installed by default; skip with:
 # - CERT_MANAGER_INSTALL_SKIP=true
 .PHONY: test-e2e
-test-e2e: manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
+test-e2e: gen-crds generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
 	@command -v $(KIND) >/dev/null 2>&1 || { \
 		echo "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
@@ -184,7 +173,7 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 ##@ Build
 
 .PHONY: ci
-ci: test lint proto-lint generate manifests vet ## Run all CI checks locally
+ci: test lint proto-lint generate gen-crds vet ## Run all CI checks locally
 	@echo "✅ All CI checks passed"
 
 # Protocol buffer definitions
@@ -203,7 +192,7 @@ proto-breaking: buf ## Check for breaking changes in protocol buffer definitions
 	cd $(PROTO_DIR) && $(BUF) breaking --against '.git#branch=main'
 
 .PHONY: build
-build: manifests generate fmt vet ## Build manager binary.
+build: gen-crds generate fmt vet ## Build manager binary.
 	go build -ldflags "$(LDFLAGS)" -o bin/manager cmd/main.go
 
 .PHONY: build-provider-libvirt
@@ -226,7 +215,7 @@ build-provider-mock: ## Build mock provider binary
 build-providers: build-provider-libvirt build-provider-vsphere build-provider-proxmox build-provider-mock ## Build all provider binaries
 
 .PHONY: run
-run: manifests generate fmt vet ## Run a controller from your host.
+run: gen-crds generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
 
 ##@ Module Release
@@ -302,7 +291,7 @@ docker-build: ## Build docker image with the manager.
 
 .PHONY: docker-build-multiplatform
 docker-build-multiplatform: ## Build docker image for multiple platforms (without push)
-	$(CONTAINER_TOOL) buildx build --platform $(BUILD_PLATFORMS) -t ${IMG} \
+	$(CONTAINER_TOOL) buildx build --platform $(BUILD_PLATFORMS) -t ${CONTROLLER_IMG} \
 		--build-arg VERSION=$(VERSION) \
 		--build-arg GIT_SHA=$(GIT_SHA) \
 		--load \
@@ -447,7 +436,7 @@ docker-buildx-provider-proxmox: ## Build and push proxmox provider for cross-pla
 	- $(CONTAINER_TOOL) buildx rm virtrigaud-proxmox-builder
 
 .PHONY: build-installer
-build-installer: sync-helm-crds generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
+build-installer: gen-crds generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
 	mkdir -p dist
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${CONTROLLER_IMG}
 	$(KUSTOMIZE) build config/default > dist/install.yaml
@@ -455,13 +444,14 @@ build-installer: sync-helm-crds generate kustomize ## Generate a consolidated YA
 ##@ Deployment
 
 .PHONY: helm-package
-helm-package: sync-helm-crds ## Package Helm chart with latest CRDs
-	@echo "Packaging Helm chart with synced CRDs..."
+helm-package: gen-helm-crds ## Package Helm chart with generated CRDs
+	@echo "Packaging Helm chart with generated CRDs..."
+	@mkdir -p dist
 	@helm package charts/virtrigaud -d dist/
 	@echo "✅ Helm chart packaged successfully"
 
 .PHONY: helm-lint
-helm-lint: sync-helm-crds ## Lint Helm chart with latest CRDs
+helm-lint: gen-helm-crds ## Lint Helm chart with generated CRDs
 	@echo "Linting Helm chart..."
 	@helm lint charts/virtrigaud
 	@echo "✅ Helm chart lint passed"
@@ -471,15 +461,15 @@ ifndef ignore-not-found
 endif
 
 .PHONY: install
-install: manifests kustomize ## Install CRDs into the K8s cluster specified in ~/.kube/config.
+install: gen-crds kustomize ## Install CRDs into the K8s cluster specified in ~/.kube/config.
 	$(KUSTOMIZE) build config/crd | $(KUBECTL) apply -f -
 
 .PHONY: uninstall
-uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+uninstall: gen-crds kustomize ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	$(KUSTOMIZE) build config/crd | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
 .PHONY: deploy
-deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
+deploy: gen-crds kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${CONTROLLER_IMG}
 	$(KUSTOMIZE) build config/default | $(KUBECTL) apply -f -
 

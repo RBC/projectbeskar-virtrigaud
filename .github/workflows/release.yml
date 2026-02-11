@@ -291,10 +291,10 @@ jobs:
         CRDUPGRADE_END=$((CRDUPGRADE_START + 20))
         sed -i "${CRDUPGRADE_START},${CRDUPGRADE_END} { s|repository: ghcr.io/projectbeskar/virtrigaud/kubectl|repository: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/kubectl|; s/tag: \"v.*\"/tag: \"${{ needs.prepare.outputs.tag }}\"/; }" charts/virtrigaud/values.yaml
 
-    - name: Sync CRDs to Helm chart
+    - name: Generate CRDs for Helm chart
       run: |
-        # Ensure Helm chart has latest CRDs before packaging
-        make sync-helm-crds
+        # Generate CRDs directly into Helm chart directory
+        make gen-helm-crds
 
     - name: Package chart
       run: |
