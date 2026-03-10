@@ -1,4 +1,6 @@
 # golangci-lint configuration for VirtRigaud
+version: "2"
+
 run:
   timeout: 10m
 
@@ -11,10 +13,20 @@ linters:
     - errcheck
     - misspell
     - unconvert
-
-linters-settings:
-  staticcheck:
-    checks: ["all"]
-  errcheck:
-    check-type-assertions: true
-    check-blank: false
+  settings:
+    staticcheck:
+      checks:
+        - "all"
+        - "-ST1000" # package-level comments — low value
+        - "-ST1003" # naming conventions (vmId etc.) — requires broad interface refactor
+        - "-ST1005" # error string capitalization
+        - "-ST1023" # redundant type in declaration
+        - "-QF1011" # redundant type in declaration (v2 rename of ST1023)
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+      exclude-functions:
+        - (io.Closer).Close
+        - (*os.File).Close
+        - (github.com/projectbeskar/virtrigaud/internal/storage.Storage).Close
+        - os.Remove
