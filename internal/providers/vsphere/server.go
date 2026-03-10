@@ -19,6 +19,7 @@ package vsphere
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -1046,45 +1047,57 @@ func (p *Provider) mapVSpherePowerState(vspherePowerState string) string {
 
 // addCloudInitToConfigSpec adds cloud-init data to VM configuration via guestinfo properties
 func (p *Provider) addCloudInitToConfigSpec(configSpec *types.VirtualMachineConfigSpec, cloudInitData string, cloudInitMetaData string) error {
-	// VMware cloud-init datasource reads from guestinfo properties
-	// This is the standard way to pass cloud-init data to VMs in vSphere
-
-	// Encode cloud-init data (base64 encoding is common but not required)
-	// We'll pass it directly as it's already in YAML format
-
-	// Create extra config options for cloud-init
-	extraConfig := []types.BaseOptionValue{
-		&types.OptionValue{
-			Key:   "guestinfo.userdata",
-			Value: cloudInitData,
-		},
-		&types.OptionValue{
-			Key:   "guestinfo.userdata.encoding",
-			Value: "yaml", // Indicate this is YAML format
-		},
+	// Defensive: return early if both userdata and metadata are empty
+	if cloudInitData == "" && cloudInitMetaData == "" {
+		p.logger.Warn("No cloudInitData or cloudInitMetaData provided", "vm_id", configSpec.Name)
+		return nil
 	}
 
-	// Add metadata - use custom if provided, otherwise use default
+	// Defensive: if only userdata is empty, skip adding it
+	var encodedUserData string
+	if cloudInitData != "" {
+		p.logger.Debug("Adding cloudInitData to VM config", "vm_id", configSpec.Name)
+		encodedUserData = base64.StdEncoding.EncodeToString([]byte(cloudInitData))
+	}
+
+	// Defensive: if only metadata is empty, skip adding it
 	var metadataValue string
-	var metadataEncoding string
 	if cloudInitMetaData != "" {
-		// Use the provided custom metadata in YAML format
 		metadataValue = cloudInitMetaData
-		metadataEncoding = "yaml"
 	} else {
-		// Use default JSON metadata with instance-id
-		metadataValue = `{"instance-id": "` + configSpec.Name + `"}`
-		metadataEncoding = "json"
+		metadataValue = `instance-id: "` + configSpec.Name + `"`
+	}
+	var encodedMetaData string
+	if metadataValue != "" {
+		p.logger.Debug("Adding metadata to VM config", "vm_id", configSpec.Name)
+		encodedMetaData = base64.StdEncoding.EncodeToString([]byte(metadataValue))
 	}
 
-	extraConfig = append(extraConfig, &types.OptionValue{
-		Key:   "guestinfo.metadata",
-		Value: metadataValue,
-	})
-	extraConfig = append(extraConfig, &types.OptionValue{
-		Key:   "guestinfo.metadata.encoding",
-		Value: metadataEncoding,
-	})
+	var extraConfig []types.BaseOptionValue
+	if encodedUserData != "" {
+		extraConfig = append(extraConfig, &types.OptionValue{
+			Key:   "guestinfo.userdata",
+			Value: encodedUserData,
+		})
+		extraConfig = append(extraConfig, &types.OptionValue{
+			Key:   "guestinfo.userdata.encoding",
+			Value: "base64",
+		})
+	}
+	if encodedMetaData != "" {
+		extraConfig = append(extraConfig, &types.OptionValue{
+			Key:   "guestinfo.metadata",
+			Value: encodedMetaData,
+		})
+		extraConfig = append(extraConfig, &types.OptionValue{
+			Key:   "guestinfo.metadata.encoding",
+			Value: "base64",
+		})
+	}
+
+	if len(extraConfig) == 0 {
+		return nil
+	}
 
 	// Add to existing extra config or create new
 	if configSpec.ExtraConfig != nil {

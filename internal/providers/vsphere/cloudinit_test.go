@@ -17,6 +17,9 @@ limitations under the License.
 package vsphere
 
 import (
+	"encoding/base64"
+	"log/slog"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -47,7 +50,7 @@ users:
 			expectedMetadata: `instance-id: custom-vm-001
 local-hostname: app-server
 region: us-west-2`,
-			expectedEncoding: "yaml",
+			expectedEncoding: "base64",
 		},
 		{
 			name: "without custom metadata (default)",
@@ -58,8 +61,8 @@ packages:
 			expectedUserData: `#cloud-config
 packages:
   - nginx`,
-			expectedMetadata: `{"instance-id": "test-vm"}`,
-			expectedEncoding: "json",
+			expectedMetadata: `instance-id: "test-vm"`,
+			expectedEncoding: "base64",
 		},
 		{
 			name: "with network configuration in metadata",
@@ -81,7 +84,7 @@ network:
   ethernets:
     eth0:
       dhcp4: true`,
-			expectedEncoding: "yaml",
+			expectedEncoding: "base64",
 		},
 		{
 			name: "with public-keys in metadata",
@@ -97,15 +100,18 @@ packages: []`,
 public-keys:
   - ssh-rsa AAAAB3... key1@example.com
   - ssh-rsa AAAAB3... key2@example.com`,
-			expectedEncoding: "yaml",
+			expectedEncoding: "base64",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create provider instance
+			// Create provider instance with logger
+			logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+				Level: slog.LevelDebug,
+			}))
 			provider := &Provider{
-				// No logger needed for this test
+				logger: logger,
 			}
 
 			// Create config spec
@@ -131,19 +137,28 @@ public-keys:
 				extraConfigMap[optionValue.Key] = value
 			}
 
-			// Verify guestinfo.userdata
-			assert.Equal(t, tt.expectedUserData, extraConfigMap["guestinfo.userdata"], "userdata should match")
-			assert.Equal(t, "yaml", extraConfigMap["guestinfo.userdata.encoding"], "userdata encoding should be yaml")
+			// Verify guestinfo.userdata - should be base64 encoded
+			decodedUserData, err := base64.StdEncoding.DecodeString(extraConfigMap["guestinfo.userdata"])
+			require.NoError(t, err, "userdata should be valid base64")
+			assert.Equal(t, tt.expectedUserData, string(decodedUserData), "userdata should match")
+			assert.Equal(t, "base64", extraConfigMap["guestinfo.userdata.encoding"], "userdata encoding should be base64")
 
-			// Verify guestinfo.metadata
-			assert.Equal(t, tt.expectedMetadata, extraConfigMap["guestinfo.metadata"], "metadata should match")
-			assert.Equal(t, tt.expectedEncoding, extraConfigMap["guestinfo.metadata.encoding"], "metadata encoding should match")
+			// Verify guestinfo.metadata - should be base64 encoded
+			decodedMetadata, err := base64.StdEncoding.DecodeString(extraConfigMap["guestinfo.metadata"])
+			require.NoError(t, err, "metadata should be valid base64")
+			assert.Equal(t, tt.expectedMetadata, string(decodedMetadata), "metadata should match")
+			assert.Equal(t, "base64", extraConfigMap["guestinfo.metadata.encoding"], "metadata encoding should be base64")
 		})
 	}
 }
 
 func TestAddCloudInitToConfigSpec_WithExistingExtraConfig(t *testing.T) {
-	provider := &Provider{}
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+	provider := &Provider{
+		logger: logger,
+	}
 
 	configSpec := &types.VirtualMachineConfigSpec{
 		Name: "test-vm",
@@ -180,15 +195,24 @@ region: us-east-1`
 	// Verify existing config is preserved
 	assert.Equal(t, "existing-value", extraConfigMap["some.existing.key"])
 
-	// Verify new cloud-init config is added
-	assert.Equal(t, cloudInitData, extraConfigMap["guestinfo.userdata"])
-	assert.Equal(t, "yaml", extraConfigMap["guestinfo.userdata.encoding"])
-	assert.Equal(t, cloudInitMetaData, extraConfigMap["guestinfo.metadata"])
-	assert.Equal(t, "yaml", extraConfigMap["guestinfo.metadata.encoding"])
+	// Verify new cloud-init config is added - should be base64 encoded
+	decodedUserData, err := base64.StdEncoding.DecodeString(extraConfigMap["guestinfo.userdata"])
+	require.NoError(t, err)
+	assert.Equal(t, cloudInitData, string(decodedUserData))
+	assert.Equal(t, "base64", extraConfigMap["guestinfo.userdata.encoding"])
+	decodedMetadata, err := base64.StdEncoding.DecodeString(extraConfigMap["guestinfo.metadata"])
+	require.NoError(t, err)
+	assert.Equal(t, cloudInitMetaData, string(decodedMetadata))
+	assert.Equal(t, "base64", extraConfigMap["guestinfo.metadata.encoding"])
 }
 
 func TestAddCloudInitToConfigSpec_EmptyMetaDataUsesDefault(t *testing.T) {
-	provider := &Provider{}
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+	provider := &Provider{
+		logger: logger,
+	}
 
 	configSpec := &types.VirtualMachineConfigSpec{
 		Name: "my-test-vm",
@@ -211,13 +235,20 @@ packages:
 		extraConfigMap[optionValue.Key] = value
 	}
 
-	// Verify default metadata uses VM name in JSON format
-	assert.Equal(t, `{"instance-id": "my-test-vm"}`, extraConfigMap["guestinfo.metadata"])
-	assert.Equal(t, "json", extraConfigMap["guestinfo.metadata.encoding"])
+	// Verify default metadata uses VM name - should be base64 encoded
+	decodedMetadata, err := base64.StdEncoding.DecodeString(extraConfigMap["guestinfo.metadata"])
+	require.NoError(t, err)
+	assert.Equal(t, `instance-id: "my-test-vm"`, string(decodedMetadata))
+	assert.Equal(t, "base64", extraConfigMap["guestinfo.metadata.encoding"])
 }
 
 func TestAddCloudInitToConfigSpec_ComplexMetaData(t *testing.T) {
-	provider := &Provider{}
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+	provider := &Provider{
+		logger: logger,
+	}
 
 	configSpec := &types.VirtualMachineConfigSpec{
 		Name: "complex-vm",
@@ -263,8 +294,10 @@ custom:
 		extraConfigMap[optionValue.Key] = value
 	}
 
-	// Verify complex metadata is preserved exactly
-	metadata := extraConfigMap["guestinfo.metadata"]
+	// Verify complex metadata is preserved exactly - should be base64 encoded
+	decodedMetadata, err := base64.StdEncoding.DecodeString(extraConfigMap["guestinfo.metadata"])
+	require.NoError(t, err)
+	metadata := string(decodedMetadata)
 	assert.Contains(t, metadata, "instance-id: complex-vm-001")
 	assert.Contains(t, metadata, "local-hostname: complex-server.example.com")
 	assert.Contains(t, metadata, "network:")
@@ -278,7 +311,7 @@ custom:
 	assert.Contains(t, metadata, "- production")
 	assert.Contains(t, metadata, "- web")
 	assert.Contains(t, metadata, "- critical")
-	assert.Equal(t, "yaml", extraConfigMap["guestinfo.metadata.encoding"])
+	assert.Equal(t, "base64", extraConfigMap["guestinfo.metadata.encoding"])
 }
 
 func TestVMSpec_CloudInitMetaData(t *testing.T) {
