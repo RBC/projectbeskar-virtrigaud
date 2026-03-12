@@ -68,10 +68,10 @@ type Config struct {
 	Password           string
 	InsecureSkipVerify bool
 	// Provider defaults from CRD
-	DefaultDatastore   string
-	DefaultStoragePod  string // Datastore Cluster for automatic datastore selection
-	DefaultCluster     string
-	DefaultFolder      string
+	DefaultDatastore  string
+	DefaultStoragePod string // Datastore Cluster for automatic datastore selection
+	DefaultCluster    string
+	DefaultFolder     string
 }
 
 // New creates and returns a new vSphere Provider instance. It reads all configuration
@@ -94,10 +94,10 @@ func New() *Provider {
 		Endpoint:           os.Getenv("PROVIDER_ENDPOINT"),
 		InsecureSkipVerify: os.Getenv("TLS_INSECURE_SKIP_VERIFY") == "true", // Allow skipping TLS verification
 		// Provider defaults - these should be set by the provider controller from CRD spec.defaults
-		DefaultDatastore:  getEnvOrDefault("PROVIDER_DEFAULT_DATASTORE", "datastore1"),
+		DefaultDatastore:  os.Getenv("PROVIDER_DEFAULT_DATASTORE"),
 		DefaultStoragePod: os.Getenv("PROVIDER_DEFAULT_STORAGE_POD"),
-		DefaultCluster:    getEnvOrDefault("PROVIDER_DEFAULT_CLUSTER", "cluster01"),
-		DefaultFolder:     getEnvOrDefault("PROVIDER_DEFAULT_FOLDER", "research-vms"),
+		DefaultCluster:    os.Getenv("PROVIDER_DEFAULT_CLUSTER"),
+		DefaultFolder:     os.Getenv("PROVIDER_DEFAULT_FOLDER"),
 	}
 
 	// Load credentials from mounted secret files
@@ -118,15 +118,6 @@ func New() *Provider {
 		finder: finder,
 		logger: slog.Default(),
 	}
-}
-
-// getEnvOrDefault returns the value of the environment variable named envVar.
-// If the variable is unset or empty, defaultValue is returned instead.
-func getEnvOrDefault(envVar, defaultValue string) string {
-	if value := os.Getenv(envVar); value != "" {
-		return value
-	}
-	return defaultValue
 }
 
 // loadCredentialsFromFiles reads the vCenter username and password from plain-text
@@ -1927,6 +1918,13 @@ type VMSpec struct {
 //
 // Returns an error if any JSON field is present but cannot be unmarshalled.
 func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, error) {
+	p.logger.Info("Starting parseCreateRequest",
+		"name", req.Name,
+		"hasClassJson", req.ClassJson != "",
+		"hasImageJson", req.ImageJson != "",
+		"hasPlacementJson", req.PlacementJson != "",
+		"placementJsonLength", len(req.PlacementJson))
+
 	spec := &VMSpec{
 		Name: req.Name,
 	}
@@ -2049,6 +2047,8 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 
 	// Parse Placement from JSON (contracts.Placement structure)
 	if req.PlacementJson != "" {
+		p.logger.Info("Parsing placement JSON", "json", req.PlacementJson, "vm_name", spec.Name)
+
 		var placement struct {
 			Cluster    string `json:"Cluster"`
 			Datastore  string `json:"Datastore"`
@@ -2061,6 +2061,14 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 			return nil, fmt.Errorf("failed to parse Placement JSON: %w", err)
 		}
 
+		p.logger.Info("Parsed placement data",
+			"cluster", placement.Cluster,
+			"datastore", placement.Datastore,
+			"storagePod", placement.StoragePod,
+			"folder", placement.Folder,
+			"host", placement.Host,
+			"vm_name", spec.Name)
+
 		// Set placement overrides if specified
 		spec.Cluster = placement.Cluster
 		spec.Datastore = placement.Datastore
@@ -2068,6 +2076,14 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 		spec.Folder = placement.Folder
 		spec.Host = placement.Host
 	}
+
+	p.logger.Info("Finished parseCreateRequest",
+		"name", spec.Name,
+		"cluster", spec.Cluster,
+		"datastore", spec.Datastore,
+		"storagePod", spec.StoragePod,
+		"folder", spec.Folder,
+		"host", spec.Host)
 
 	return spec, nil
 }
@@ -2142,6 +2158,13 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 
 	// Determine which datastore to use (spec override, StoragePod, or provider default)
 	var datastore *object.Datastore
+	p.logger.Info("Determining datastore placement",
+		"spec.Datastore", spec.Datastore,
+		"spec.StoragePod", spec.StoragePod,
+		"config.DefaultStoragePod", p.config.DefaultStoragePod,
+		"config.DefaultDatastore", p.config.DefaultDatastore,
+		"vm_name", spec.Name)
+
 	if spec.Datastore != "" {
 		p.logger.Info("Using placement override for datastore", "datastore", spec.Datastore)
 		datastore, err = p.finder.Datastore(ctx, spec.Datastore)
@@ -2152,6 +2175,7 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		storagePodName := p.config.DefaultStoragePod
 		if spec.StoragePod != "" {
 			storagePodName = spec.StoragePod
+			p.logger.Info("Using placement override for StoragePod", "storagePod", storagePodName, "vm_name", spec.Name)
 		}
 		if storagePodName != "" {
 			p.logger.Info("Resolving datastore from StoragePod", "storagePod", storagePodName)
@@ -2159,7 +2183,14 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 			if err != nil {
 				return "", fmt.Errorf("failed to resolve datastore from StoragePod '%s': %w", storagePodName, err)
 			}
+			p.logger.Info("Successfully resolved datastore from StoragePod",
+				"storagePod", storagePodName,
+				"datastore", datastore.Name(),
+				"vm_name", spec.Name)
 		} else {
+			p.logger.Info("No StoragePod specified, using default datastore",
+				"datastore", p.config.DefaultDatastore,
+				"vm_name", spec.Name)
 			datastore, err = p.finder.Datastore(ctx, p.config.DefaultDatastore)
 			if err != nil {
 				return "", fmt.Errorf("failed to find datastore '%s': %w", p.config.DefaultDatastore, err)

@@ -45,6 +45,9 @@ var (
 )
 
 func init() {
+	// Set up logger early to avoid "log.SetLogger(...) was never called" warnings
+	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
+
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(infrav1beta1.AddToScheme(scheme))
@@ -72,6 +75,7 @@ func main() {
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
+	// Override the logger with flag-based options if provided
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
