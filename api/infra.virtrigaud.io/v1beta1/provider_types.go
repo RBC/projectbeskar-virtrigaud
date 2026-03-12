@@ -458,10 +458,17 @@ type NetworkUsageStats struct {
 
 // ProviderDefaults provides default settings for VMs
 type ProviderDefaults struct {
-	// Datastore specifies the default datastore
+	// Datastore specifies the default datastore.
+	// Mutually exclusive with StoragePod; Datastore takes precedence if both are set.
 	// +optional
 	// +kubebuilder:validation:MaxLength=255
 	Datastore string `json:"datastore,omitempty"`
+
+	// StoragePod specifies a vSphere Datastore Cluster (StoragePod) used as the default
+	// for automatic datastore selection when no explicit Datastore is specified.
+	// +optional
+	// +kubebuilder:validation:MaxLength=255
+	StoragePod string `json:"storagePod,omitempty"`
 
 	// Cluster specifies the default cluster
 	// +optional

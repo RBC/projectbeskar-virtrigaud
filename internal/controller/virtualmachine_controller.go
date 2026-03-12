@@ -716,9 +716,10 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 	var placement *contracts.Placement
 	if vm.Spec.Placement != nil {
 		placement = &contracts.Placement{
-			Datastore: vm.Spec.Placement.Datastore,
-			Cluster:   vm.Spec.Placement.Cluster,
-			Folder:    vm.Spec.Placement.Folder,
+			Datastore:  vm.Spec.Placement.Datastore,
+			StoragePod: vm.Spec.Placement.StoragePod,
+			Cluster:    vm.Spec.Placement.Cluster,
+			Folder:     vm.Spec.Placement.Folder,
 		}
 	}
 

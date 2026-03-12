@@ -35,6 +35,7 @@ import (
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/session"
+	"github.com/vmware/govmomi/view"
 	"github.com/vmware/govmomi/vim25"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/soap"
@@ -67,21 +68,36 @@ type Config struct {
 	Password           string
 	InsecureSkipVerify bool
 	// Provider defaults from CRD
-	DefaultDatastore string
-	DefaultCluster   string
-	DefaultFolder    string
+	DefaultDatastore   string
+	DefaultStoragePod  string // Datastore Cluster for automatic datastore selection
+	DefaultCluster     string
+	DefaultFolder      string
 }
 
-// New creates a new vSphere provider that reads configuration from environment and mounted secrets
+// New creates and returns a new vSphere Provider instance. It reads all configuration
+// from environment variables and mounted Kubernetes secret files:
+//
+//   - PROVIDER_ENDPOINT: vCenter SOAP API URL (required), e.g. https://vcenter.example.com/sdk
+//   - TLS_INSECURE_SKIP_VERIFY: set to "true" to disable TLS certificate verification
+//   - PROVIDER_DEFAULT_DATASTORE: datastore name to use when none is specified (default: "datastore1")
+//   - PROVIDER_DEFAULT_STORAGE_POD: datastore cluster name for automatic placement
+//   - PROVIDER_DEFAULT_CLUSTER: compute cluster name (default: "cluster01")
+//   - PROVIDER_DEFAULT_FOLDER: VM folder path (default: "research-vms")
+//
+// Credentials (username and password) are read from files mounted at CredentialsPath
+// by the provider controller. If credentials or endpoint are missing the govmomi
+// client will not be created; the error is logged but New still returns a Provider —
+// Validate will subsequently report the connection failure.
 func New() *Provider {
 	// Load configuration from environment (set by provider controller)
 	config := &Config{
 		Endpoint:           os.Getenv("PROVIDER_ENDPOINT"),
 		InsecureSkipVerify: os.Getenv("TLS_INSECURE_SKIP_VERIFY") == "true", // Allow skipping TLS verification
 		// Provider defaults - these should be set by the provider controller from CRD spec.defaults
-		DefaultDatastore: getEnvOrDefault("PROVIDER_DEFAULT_DATASTORE", "datastore1"),
-		DefaultCluster:   getEnvOrDefault("PROVIDER_DEFAULT_CLUSTER", "cluster01"),
-		DefaultFolder:    getEnvOrDefault("PROVIDER_DEFAULT_FOLDER", "research-vms"),
+		DefaultDatastore:  getEnvOrDefault("PROVIDER_DEFAULT_DATASTORE", "datastore1"),
+		DefaultStoragePod: os.Getenv("PROVIDER_DEFAULT_STORAGE_POD"),
+		DefaultCluster:    getEnvOrDefault("PROVIDER_DEFAULT_CLUSTER", "cluster01"),
+		DefaultFolder:     getEnvOrDefault("PROVIDER_DEFAULT_FOLDER", "research-vms"),
 	}
 
 	// Load credentials from mounted secret files
@@ -104,7 +120,8 @@ func New() *Provider {
 	}
 }
 
-// getEnvOrDefault returns environment variable value or default if not set
+// getEnvOrDefault returns the value of the environment variable named envVar.
+// If the variable is unset or empty, defaultValue is returned instead.
 func getEnvOrDefault(envVar, defaultValue string) string {
 	if value := os.Getenv(envVar); value != "" {
 		return value
@@ -112,7 +129,11 @@ func getEnvOrDefault(envVar, defaultValue string) string {
 	return defaultValue
 }
 
-// loadCredentialsFromFiles reads credentials from mounted secret files
+// loadCredentialsFromFiles reads the vCenter username and password from plain-text
+// files mounted by the provider controller at CredentialsPath. The files are
+// expected to be named "username" and "password". Surrounding whitespace (including
+// newlines added by base64-encoded secrets) is trimmed before storing the values in
+// config. An error is returned if either file cannot be read.
 func loadCredentialsFromFiles(config *Config) error {
 	// Read username from mounted secret
 	if data, err := os.ReadFile(CredentialsPath + "/username"); err == nil {
@@ -131,7 +152,17 @@ func loadCredentialsFromFiles(config *Config) error {
 	return nil
 }
 
-// createVSphereClient creates a govmomi client and finder from the configuration
+// createVSphereClient establishes an authenticated govmomi session against the vCenter
+// SOAP API described by config and returns a connected govmomi.Client together with a
+// Finder configured to search the default datacenter.
+//
+// Credentials are passed via url.UserPassword so that special characters in passwords
+// are handled correctly and are never embedded in the URL string. TLS verification is
+// controlled by config.InsecureSkipVerify; when verification is enabled the expected
+// server name is set to the host component of the endpoint URL.
+//
+// An error is returned if the endpoint URL is missing, credentials are empty, the TCP
+// connection cannot be established, or the Login call is rejected by vCenter.
 func createVSphereClient(config *Config) (*govmomi.Client, *find.Finder, error) {
 	if config.Endpoint == "" {
 		return nil, nil, fmt.Errorf("PROVIDER_ENDPOINT environment variable is required")
@@ -180,8 +211,88 @@ func createVSphereClient(config *Config) (*govmomi.Client, *find.Finder, error) 
 	return client, finder, nil
 }
 
-// cloneDiskToStreamOptimized clones a disk to streamOptimized format using VirtualDiskManager
-// This handles all VMDK formats including sesparse, flat, thick, and thin
+// resolveDatastoreFromStoragePod picks the datastore with the most free space from the
+// vSphere Datastore Cluster (StoragePod) identified by storagePodName. This implements
+// a lightweight alternative to Storage DRS: the caller does not need Storage DRS enabled
+// on the cluster.
+//
+// The method enumerates all StoragePod objects via a container view, locates the one
+// matching storagePodName, then retrieves summary information for all member datastores
+// using the property collector. It delegates the selection to selectBestDatastoreByFreeSpace
+// and returns an object.Datastore wrapping the winning managed-object reference.
+//
+// Returns an error if the StoragePod is not found, contains no accessible datastores, or
+// if any vSphere API call fails.
+func (p *Provider) resolveDatastoreFromStoragePod(ctx context.Context, storagePodName string) (*object.Datastore, error) {
+	viewMgr := view.NewManager(p.client.Client)
+	v, err := viewMgr.CreateContainerView(ctx, p.client.ServiceContent.RootFolder, []string{"StoragePod"}, true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create container view for StoragePods: %w", err)
+	}
+	defer func() { _ = v.Destroy(ctx) }()
+
+	var pods []mo.StoragePod
+	if err := v.Retrieve(ctx, []string{"StoragePod"}, []string{"name", "childEntity"}, &pods); err != nil {
+		return nil, fmt.Errorf("failed to retrieve StoragePods: %w", err)
+	}
+
+	var childRefs []types.ManagedObjectReference
+	for _, pod := range pods {
+		if pod.Name == storagePodName {
+			childRefs = pod.ChildEntity
+			break
+		}
+	}
+	if childRefs == nil {
+		return nil, fmt.Errorf("StoragePod '%s' not found", storagePodName)
+	}
+	if len(childRefs) == 0 {
+		return nil, fmt.Errorf("StoragePod '%s' contains no datastores", storagePodName)
+	}
+
+	pc := property.DefaultCollector(p.client.Client)
+	var datastores []mo.Datastore
+	if err := pc.Retrieve(ctx, childRefs, []string{"name", "summary"}, &datastores); err != nil {
+		return nil, fmt.Errorf("failed to retrieve datastores from StoragePod '%s': %w", storagePodName, err)
+	}
+	if len(datastores) == 0 {
+		return nil, fmt.Errorf("StoragePod '%s' has no accessible datastores", storagePodName)
+	}
+
+	best := selectBestDatastoreByFreeSpace(datastores)
+	p.logger.Info("Selected datastore from StoragePod",
+		"storagePod", storagePodName,
+		"datastore", best.Name,
+		"freeSpaceGiB", best.Summary.FreeSpace/1024/1024/1024,
+	)
+	return object.NewDatastore(p.client.Client, best.Reference()), nil
+}
+
+// selectBestDatastoreByFreeSpace performs a linear scan over datastores and returns the
+// one whose Summary.FreeSpace field is largest. The caller must ensure that the slice is
+// non-empty; passing an empty slice will panic on the initial index access.
+func selectBestDatastoreByFreeSpace(datastores []mo.Datastore) mo.Datastore {
+	best := datastores[0]
+	for _, ds := range datastores[1:] {
+		if ds.Summary.FreeSpace > best.Summary.FreeSpace {
+			best = ds
+		}
+	}
+	return best
+}
+
+// cloneDiskToStreamOptimized copies the VMDK at sourcePath to destPath using the
+// VirtualDiskManager API, converting the on-disk format to sparseMonolithic in the
+// process. sparseMonolithic produces a single, self-contained, compressed VMDK file
+// that is universally compatible with OVF/OVA tooling and can be downloaded in one
+// HTTP request.
+//
+// sourcePath and destPath must be fully-qualified vSphere datastore paths of the form
+// "[datastoreName] path/to/file.vmdk". Both paths are resolved against the default
+// datacenter. This approach handles all input VMDK subtypes (sesparse, flat, thick,
+// thin) without requiring the caller to know the source format.
+//
+// The call blocks until VirtualDiskManager.CopyVirtualDisk task completes.
 func (p *Provider) cloneDiskToStreamOptimized(ctx context.Context, sourcePath, destPath string) error {
 	if p.client == nil {
 		return fmt.Errorf("vSphere client not initialized")
@@ -221,7 +332,12 @@ func (p *Provider) cloneDiskToStreamOptimized(ctx context.Context, sourcePath, d
 	return nil
 }
 
-// Validate validates the provider configuration and connectivity
+// Validate implements the ProviderServer interface. It verifies that the vSphere client
+// is initialized and that the current session is still active (govmomi.Client.Valid).
+// If the session has expired, Validate attempts to create a fresh client using the
+// stored configuration. On success it returns ValidateResponse{Ok: true}; on any failure
+// it returns ValidateResponse{Ok: false, Message: <reason>} without propagating a gRPC
+// error, so the controller can surface the message to the user.
 func (p *Provider) Validate(ctx context.Context, req *providerv1.ValidateRequest) (*providerv1.ValidateResponse, error) {
 	if p.client == nil {
 		return &providerv1.ValidateResponse{
@@ -250,7 +366,16 @@ func (p *Provider) Validate(ctx context.Context, req *providerv1.ValidateRequest
 	}, nil
 }
 
-// GetCapabilities returns the provider's capabilities
+// GetCapabilities implements the ProviderServer interface and returns a static description
+// of the features supported by this vSphere provider:
+//
+//   - Online reconfiguration of CPU and memory (hot-add must be enabled on the VM)
+//   - Online disk expansion
+//   - Snapshots (disk-only; memory snapshots are not captured by default)
+//   - Linked clones (delta-disk backed clones sharing a parent disk)
+//   - Image import from external sources
+//   - Disk types: thin, thick, eager-zeroed
+//   - Network types: standard vSwitch portgroups and distributed virtual switch portgroups
 func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
 	return &providerv1.GetCapabilitiesResponse{
 		SupportsReconfigureOnline:   true,
@@ -264,7 +389,19 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 	}, nil
 }
 
-// Create creates a new virtual machine
+// Create implements the ProviderServer interface. It provisions a new virtual machine
+// based on the JSON-encoded specifications contained in req (VMClass, VMImage, networks,
+// cloud-init user-data, cloud-init metadata, and placement overrides).
+//
+// Two creation paths are supported:
+//   - Template clone: when req.ImageJson contains a TemplateName the VM is created by
+//     cloning an existing vSphere VM or template with CloneVM_Task.
+//   - Imported disk: when req.ImageJson contains a Path the VM is created from scratch
+//     (CreateVM_Task) with the pre-uploaded VMDK attached as a persistent disk.
+//
+// In both cases the VM is powered on immediately after creation. The returned
+// CreateResponse.Id contains the vSphere ManagedObjectReference value (e.g. "vm-42")
+// which is used as the stable VM identifier in all subsequent API calls.
 func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*providerv1.CreateResponse, error) {
 	if p.client == nil {
 		return nil, fmt.Errorf("vSphere client not configured")
@@ -288,7 +425,20 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 	}, nil
 }
 
-// Delete deletes a virtual machine
+// Delete implements the ProviderServer interface. It removes the virtual machine
+// identified by req.Id (vSphere ManagedObjectReference value) from the vCenter
+// inventory and deletes all associated files from the datastore.
+//
+// The operation follows this sequence:
+//  1. Look up the VM power state via its ManagedObjectReference.
+//  2. If the VM is not found (SOAP fault), treat the deletion as already complete
+//     and return success (idempotent behaviour).
+//  3. If the VM is powered on, issue a PowerOff task and wait for it to finish.
+//     A power-off failure is logged but does not abort the deletion.
+//  4. Issue a Destroy task (equivalent to "Delete from Disk" in the vSphere UI)
+//     and wait for it to complete.
+//
+// The operation blocks until the Destroy task finishes.
 func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*providerv1.TaskResponse, error) {
 	if p.client == nil {
 		return nil, fmt.Errorf("vSphere client not configured")
@@ -367,7 +517,19 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 	return &providerv1.TaskResponse{}, nil
 }
 
-// Power performs power operations on a virtual machine
+// Power implements the ProviderServer interface. It performs one of the following power
+// operations on the virtual machine identified by req.Id:
+//
+//   - POWER_OP_ON: issues PowerOn_Task and waits for completion.
+//   - POWER_OP_OFF: issues PowerOff_Task (hard power-off) and waits for completion.
+//   - POWER_OP_REBOOT: calls RebootGuest via VMware Tools; requires Tools to be running.
+//     This call is synchronous — no task is polled.
+//   - POWER_OP_SHUTDOWN_GRACEFUL: delegates to performGracefulShutdown, which attempts
+//     ShutdownGuest via VMware Tools and falls back to a hard PowerOff if Tools are
+//     unavailable or the graceful timeout (req.GracefulTimeoutSeconds, default 60 s)
+//     elapses.
+//
+// All operations except REBOOT block until the underlying vSphere task completes.
 func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*providerv1.TaskResponse, error) {
 	if p.client == nil {
 		return nil, fmt.Errorf("vSphere client not configured")
@@ -432,7 +594,16 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 	return &providerv1.TaskResponse{}, nil
 }
 
-// performGracefulShutdown performs a graceful shutdown using VMware guest tools
+// performGracefulShutdown sends a guest OS shutdown request via VMware Tools and waits
+// for the VM to reach the powered-off state within the configured timeout.
+//
+// The graceful timeout is taken from req.GracefulTimeoutSeconds; if zero or negative,
+// a default of 60 seconds is used. Before issuing ShutdownGuest the method checks the
+// VMware Tools status via getVMwareToolsStatus. If Tools are not installed or are in a
+// non-operational state ("toolsOk" or "toolsOld" are the only accepted values), the
+// method falls back immediately to a hard PowerOff via fallbackToPowerOff. The same
+// fallback occurs if ShutdownGuest returns an error or if the VM has not reached
+// powered-off state before the timeout expires.
 func (p *Provider) performGracefulShutdown(ctx context.Context, vm *object.VirtualMachine, req *providerv1.PowerRequest) (*providerv1.TaskResponse, error) {
 	// Default timeout if not specified
 	gracefulTimeout := 60 * time.Second
@@ -471,7 +642,11 @@ func (p *Provider) performGracefulShutdown(ctx context.Context, vm *object.Virtu
 	return p.waitForGracefulShutdown(ctx, vm, req.Id, gracefulTimeout)
 }
 
-// getVMwareToolsStatus checks the status of VMware Tools on the VM
+// getVMwareToolsStatus retrieves the guest.toolsStatus property of vm via the property
+// collector. The returned string corresponds to the VirtualMachineToolsStatus enum
+// values reported by vSphere, such as "toolsOk", "toolsOld", "toolsNotInstalled", or
+// "toolsNotRunning". If the Guest information object is nil (e.g. the VM has never been
+// powered on) "toolsNotInstalled" is returned as a safe default.
 func (p *Provider) getVMwareToolsStatus(ctx context.Context, vm *object.VirtualMachine) (string, error) {
 	var vmObj mo.VirtualMachine
 	err := vm.Properties(ctx, vm.Reference(), []string{"guest.toolsStatus"}, &vmObj)
@@ -486,7 +661,11 @@ func (p *Provider) getVMwareToolsStatus(ctx context.Context, vm *object.VirtualM
 	return string(vmObj.Guest.ToolsStatus), nil
 }
 
-// waitForGracefulShutdown waits for the VM to shut down gracefully within the timeout
+// waitForGracefulShutdown polls the VM power state every 2 seconds until it reaches
+// VirtualMachinePowerStatePoweredOff or until timeout expires. A child context derived
+// from ctx with the given timeout controls the polling loop, so the function also
+// respects cancellation of the parent context. If the timeout is reached, the method
+// falls back to a hard power-off via fallbackToPowerOff.
 func (p *Provider) waitForGracefulShutdown(ctx context.Context, vm *object.VirtualMachine, vmID string, timeout time.Duration) (*providerv1.TaskResponse, error) {
 	p.logger.Info("Waiting for graceful shutdown to complete", "vm_id", vmID, "timeout", timeout)
 
@@ -522,7 +701,9 @@ func (p *Provider) waitForGracefulShutdown(ctx context.Context, vm *object.Virtu
 	}
 }
 
-// fallbackToPowerOff performs a hard power off when graceful shutdown fails
+// fallbackToPowerOff issues a hard PowerOff_Task against vm and waits for it to
+// complete. It is called by performGracefulShutdown and waitForGracefulShutdown when
+// graceful shutdown via VMware Tools is not possible or has timed out.
 func (p *Provider) fallbackToPowerOff(ctx context.Context, vm *object.VirtualMachine, vmID string) (*providerv1.TaskResponse, error) {
 	p.logger.Info("Performing hard power off", "vm_id", vmID)
 
@@ -541,7 +722,21 @@ func (p *Provider) fallbackToPowerOff(ctx context.Context, vm *object.VirtualMac
 	return &providerv1.TaskResponse{}, nil
 }
 
-// Reconfigure reconfigures a virtual machine
+// Reconfigure implements the ProviderServer interface. It applies the desired
+// configuration described by req.DesiredJson to the virtual machine identified by
+// req.Id. The JSON payload is expected to contain a subset of the following top-level
+// keys:
+//
+//   - "class": object with "cpus" (number) and/or "memory" (string, e.g. "4Gi") fields
+//     for CPU and memory adjustments.
+//   - "disks": array where the first element may contain a "size" (string, e.g. "100Gi")
+//     field to expand the primary disk.
+//
+// Current values are retrieved from vCenter before building the change-spec so that
+// only actual differences trigger a ReconfigVM_Task. If no changes are detected the
+// method returns success immediately without contacting vSphere. Disk shrinks are not
+// permitted; a resize is only applied when the desired size is larger than the current
+// allocated size.
 func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureRequest) (*providerv1.TaskResponse, error) {
 	if p.client == nil {
 		return nil, fmt.Errorf("vSphere client not configured")
@@ -682,7 +877,15 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 	return &providerv1.TaskResponse{}, nil
 }
 
-// parseMemory parses memory strings like "2Gi", "2048Mi" to MiB
+// parseMemory converts a Kubernetes-style quantity string to mebibytes (MiB).
+// Supported suffixes and their conversions:
+//
+//   - "Gi" — gibibytes, multiplied by 1024 to yield MiB.
+//   - "Mi" — mebibytes, returned as-is.
+//   - "Ki" — kibibytes, divided by 1024 to yield MiB (fractional KiB is truncated).
+//   - no suffix — assumed to already be MiB; parsed as a decimal integer.
+//
+// An error is returned for unrecognised suffixes or non-numeric values.
 func (p *Provider) parseMemory(memStr string) (int64, error) {
 	memStr = strings.TrimSpace(memStr)
 
@@ -718,7 +921,17 @@ func (p *Provider) parseMemory(memStr string) (int64, error) {
 	return val, nil
 }
 
-// HardwareUpgrade upgrades the hardware version of a virtual machine
+// HardwareUpgrade implements the ProviderServer interface. It upgrades the virtual
+// hardware compatibility level of the VM identified by req.Id to the version specified
+// by req.TargetVersion (integer, e.g. 21 maps to "vmx-21").
+//
+// Prerequisites enforced by this method:
+//   - The VM must be powered off; an error is returned otherwise.
+//   - The target version must be strictly newer than the current version as determined
+//     by isNewerHardwareVersion; downgrading is not supported.
+//
+// If the VM is already at the requested version the method returns success without
+// issuing an UpgradeVM_Task. The upgrade task blocks until completion.
 func (p *Provider) HardwareUpgrade(ctx context.Context, req *providerv1.HardwareUpgradeRequest) (*providerv1.TaskResponse, error) {
 	if p.client == nil {
 		return nil, fmt.Errorf("vSphere client not configured")
@@ -797,7 +1010,10 @@ func (p *Provider) HardwareUpgrade(ctx context.Context, req *providerv1.Hardware
 	return &providerv1.TaskResponse{}, nil
 }
 
-// isNewerHardwareVersion checks if target version is newer than current version
+// isNewerHardwareVersion reports whether target represents a higher hardware version than
+// current. Both strings are expected to be in the vSphere "vmx-N" format (e.g. "vmx-19",
+// "vmx-21"). The numeric suffix is extracted with fmt.Sscanf; if parsing fails for either
+// argument that argument's version number defaults to 0.
 func (p *Provider) isNewerHardwareVersion(current, target string) bool {
 	// Extract version numbers from vmx-XX format
 	var currentNum, targetNum int
@@ -815,7 +1031,21 @@ func (p *Provider) isNewerHardwareVersion(current, target string) bool {
 	return targetNum > currentNum
 }
 
-// Describe retrieves virtual machine information
+// Describe implements the ProviderServer interface. It retrieves a comprehensive
+// snapshot of the virtual machine identified by req.Id (vSphere ManagedObjectReference
+// value) and returns it as a DescribeResponse.
+//
+// The response includes:
+//   - Exists: false if the VM cannot be found or is inaccessible.
+//   - PowerState: "On", "Off" (suspended VMs are reported as "Off").
+//   - Ips: all non-loopback, non-link-local IPv4/IPv6 addresses reported by VMware Tools.
+//   - ConsoleUrl: a vSphere web client URL for direct browser access to the VM console.
+//   - ProviderRawJson: a JSON object with extended fields (cpu_count, memory_mb,
+//     cpu_usage_mhz, memory_usage_mb, uptime_seconds, boot_time, guest OS, hostname,
+//     VMware Tools status and version).
+//
+// If the property collector call fails (e.g. VM was deleted), the method returns
+// Exists: false rather than propagating a gRPC error.
 func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest) (*providerv1.DescribeResponse, error) {
 	if p.client == nil {
 		return nil, fmt.Errorf("vSphere client not configured")
@@ -1010,7 +1240,7 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 	}, nil
 }
 
-// contains checks if a string slice contains a specific string
+// contains reports whether item is present in slice using a linear search.
 func contains(slice []string, item string) bool {
 	for _, s := range slice {
 		if s == item {
@@ -1020,7 +1250,12 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
-// isValidIPAddress filters out unwanted IP addresses (loopback, link-local, etc.)
+// isValidIPAddress reports whether ip is a routable address suitable for inclusion in
+// the Describe/ListVMs response. The following addresses are rejected:
+//   - IPv4 loopback: 127.0.0.1
+//   - IPv6 loopback: ::1
+//   - IPv4 link-local: 169.254.0.0/16
+//   - IPv6 link-local: fe80::/10 (matched by "fe80:" prefix)
 func (p *Provider) isValidIPAddress(ip string) bool {
 	// Filter out localhost and link-local addresses
 	if ip == "127.0.0.1" || ip == "::1" ||
@@ -1031,7 +1266,13 @@ func (p *Provider) isValidIPAddress(ip string) bool {
 	return true
 }
 
-// mapVSpherePowerState maps vSphere power states to VirtRigaud standard power states
+// mapVSpherePowerState translates a vSphere VirtualMachinePowerState string to the
+// VirtRigaud canonical power state strings used in API responses:
+//
+//   - "poweredOn"  → "On"
+//   - "poweredOff" → "Off"
+//   - "suspended"  → "Off" (suspended VMs are treated as effectively off)
+//   - any other    → "Off" (safe default for unknown states)
 func (p *Provider) mapVSpherePowerState(vspherePowerState string) string {
 	switch vspherePowerState {
 	case "poweredOn":
@@ -1045,7 +1286,21 @@ func (p *Provider) mapVSpherePowerState(vspherePowerState string) string {
 	}
 }
 
-// addCloudInitToConfigSpec adds cloud-init data to VM configuration via guestinfo properties
+// addCloudInitToConfigSpec injects cloud-init configuration into configSpec using the
+// VMware guestinfo mechanism, which is the standard way to pass cloud-init data to VMs
+// without a CD-ROM or network datasource. Both values are base64-encoded and stored in
+// the VM's ExtraConfig alongside their encoding hint keys so that cloud-init inside the
+// guest can locate and decode them at boot:
+//
+//   - guestinfo.userdata        → base64(cloudInitData)
+//   - guestinfo.userdata.encoding → "base64"
+//   - guestinfo.metadata        → base64(cloudInitMetaData or fallback)
+//   - guestinfo.metadata.encoding → "base64"
+//
+// If cloudInitMetaData is empty, a minimal metadata document containing only
+// "instance-id: <vmName>" is used as a fallback. If both cloudInitData and
+// cloudInitMetaData are empty the method returns nil immediately without modifying
+// configSpec. New ExtraConfig entries are appended to any existing entries.
 func (p *Provider) addCloudInitToConfigSpec(configSpec *types.VirtualMachineConfigSpec, cloudInitData string, cloudInitMetaData string) error {
 	// Defensive: return early if both userdata and metadata are empty
 	if cloudInitData == "" && cloudInitMetaData == "" {
@@ -1109,7 +1364,23 @@ func (p *Provider) addCloudInitToConfigSpec(configSpec *types.VirtualMachineConf
 	return nil
 }
 
-// TaskStatus checks the status of an async task
+// TaskStatus implements the ProviderServer interface. It polls the vSphere task
+// identified by req.Task.Id (a Task ManagedObjectReference value) and returns its
+// current state.
+//
+// Because govmomi's Task.WaitForResult blocks until the task reaches a terminal state,
+// this method effectively converts an already-running vSphere task into a synchronous
+// call from the controller's perspective. Terminal states and their mapping:
+//
+//   - TaskInfoStateSuccess → Done: true, no error
+//   - TaskInfoStateError   → Done: true, Error: localised error message from vCenter
+//   - TaskInfoStateQueued  → Done: false
+//   - TaskInfoStateRunning → Done: false
+//   - any other state      → Done: true, Error: "unexpected task state: <state>"
+//
+// If WaitForResult itself returns an error (e.g. session expired, task not found) the
+// method returns Done: true with the error message rather than propagating a gRPC error,
+// so the controller can surface it cleanly.
 func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusRequest) (*providerv1.TaskStatusResponse, error) {
 	if p.client == nil {
 		return nil, fmt.Errorf("vSphere client not configured")
@@ -1176,7 +1447,20 @@ func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusReq
 	}, nil
 }
 
-// SnapshotCreate creates a snapshot of a virtual machine
+// SnapshotCreate implements the ProviderServer interface. It creates a disk-only
+// snapshot of the virtual machine identified by req.VmId.
+//
+// Snapshot name: req.NameHint is used if non-empty; otherwise a name of the form
+// "snapshot-<unix-timestamp>" is generated automatically.
+//
+// Memory: req.IncludeMemory controls whether the VM's in-memory state is captured.
+// Note that GetCapabilities reports SupportsMemorySnapshots: false, so callers should
+// generally pass false.
+//
+// Quiesce: filesystem quiescing (which requires VMware Tools and guest coordination) is
+// always disabled in this implementation. The SnapshotCreateResponse.SnapshotId contains
+// the ManagedObjectReference value of the newly created VirtualMachineSnapshot object,
+// which is used in subsequent SnapshotDelete and SnapshotRevert calls.
 func (p *Provider) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCreateRequest) (*providerv1.SnapshotCreateResponse, error) {
 	if p.client == nil {
 		return nil, fmt.Errorf("vSphere client not configured")
@@ -1254,7 +1538,14 @@ func (p *Provider) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotC
 	}, nil
 }
 
-// SnapshotDelete deletes a snapshot
+// SnapshotDelete implements the ProviderServer interface. It removes the snapshot
+// identified by req.SnapshotId from the VM identified by req.VmId.
+//
+// The snapshot tree is traversed with findSnapshotByID which matches first by
+// ManagedObjectReference value and falls back to snapshot name. RemoveSnapshot_Task is
+// called with removeChildren=false (orphan child snapshots are re-parented rather than
+// deleted) and consolidate=true (delta disks are merged after removal to reclaim space).
+// The call blocks until the task completes.
 func (p *Provider) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDeleteRequest) (*providerv1.TaskResponse, error) {
 	if p.client == nil {
 		return nil, fmt.Errorf("vSphere client not configured")
@@ -1316,7 +1607,14 @@ func (p *Provider) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotD
 	return &providerv1.TaskResponse{}, nil
 }
 
-// SnapshotRevert reverts to a snapshot
+// SnapshotRevert implements the ProviderServer interface. It reverts the virtual machine
+// identified by req.VmId to the state captured in the snapshot identified by
+// req.SnapshotId.
+//
+// The snapshot is located by traversing the VM's snapshot tree with findSnapshotByID
+// (matching by ManagedObjectReference value or name). RevertToSnapshot_Task is called
+// with suppressPowerOn=false, meaning the VM will be automatically powered on if the
+// snapshot was taken while the VM was running. The call blocks until the task completes.
 func (p *Provider) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRevertRequest) (*providerv1.TaskResponse, error) {
 	if p.client == nil {
 		return nil, fmt.Errorf("vSphere client not configured")
@@ -1383,7 +1681,11 @@ func (p *Provider) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotR
 	return &providerv1.TaskResponse{}, nil
 }
 
-// findSnapshotByID recursively searches for a snapshot by its ManagedObjectReference value
+// findSnapshotByID performs a depth-first recursive search of the VM snapshot tree.
+// It returns a pointer to the first VirtualMachineSnapshotTree entry whose
+// Snapshot.Value (ManagedObjectReference) equals snapshotID. As a secondary fallback,
+// an entry whose Name field equals snapshotID is also accepted. Returns nil if no
+// matching snapshot is found at any depth.
 func (p *Provider) findSnapshotByID(snapshots []types.VirtualMachineSnapshotTree, snapshotID string) *types.VirtualMachineSnapshotTree {
 	for i := range snapshots {
 		if snapshots[i].Snapshot.Value == snapshotID {
@@ -1406,7 +1708,23 @@ func (p *Provider) findSnapshotByID(snapshots []types.VirtualMachineSnapshotTree
 	return nil
 }
 
-// Clone clones a virtual machine
+// Clone implements the ProviderServer interface. It creates a new VM named
+// req.TargetName from the source VM identified by req.SourceVmId.
+//
+// Two clone modes are supported based on req.Linked:
+//
+//   - Full clone (req.Linked == false): all disk backings are copied to the target
+//     datastore (DiskMoveType: MoveAllDiskBackingsAndAllowSharing). The clone is
+//     completely independent of the source.
+//   - Linked clone (req.Linked == true): a delta disk is created on top of a snapshot
+//     of the source VM (DiskMoveType: CreateNewChildDiskBacking). If the source has
+//     existing snapshots the most recent root-level snapshot is used; otherwise a new
+//     snapshot named "clone-base-<timestamp>" is created automatically.
+//
+// Placement uses the provider defaults (cluster, datastore, folder); the folder falls
+// back to the datacenter's default VM folder if the configured folder path is not found.
+// The cloned VM is left powered off. The returned CloneResponse.TargetVmId contains
+// the ManagedObjectReference value of the new VM.
 func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*providerv1.CloneResponse, error) {
 	if p.client == nil {
 		return nil, fmt.Errorf("vSphere client not configured")
@@ -1554,7 +1872,9 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 	}, nil
 }
 
-// ImagePrepare prepares an image/template
+// ImagePrepare implements the ProviderServer interface. Image preparation (converting
+// an external image into a vSphere template) is not yet implemented for this provider;
+// the method always returns an Unimplemented error.
 func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.TaskResponse, error) {
 	return nil, errors.NewUnimplemented("ImagePrepare operation not yet implemented for vSphere")
 }
@@ -1582,13 +1902,30 @@ type VMSpec struct {
 	TPMEnabled                  bool   // Enable TPM
 	VTDEnabled                  bool   // Enable Intel VT-d or AMD-Vi
 	// Placement overrides
-	Cluster   string // Cluster override (empty = use provider default)
-	Datastore string // Datastore override (empty = use provider default)
-	Folder    string // Folder override (empty = use provider default)
-	Host      string // Host override (empty = use provider default)
+	Cluster    string // Cluster override (empty = use provider default)
+	Datastore  string // Datastore override (empty = use provider default)
+	StoragePod string // Datastore Cluster override (empty = use provider default; ignored when Datastore is set)
+	Folder     string // Folder override (empty = use provider default)
+	Host       string // Host override (empty = use provider default)
 }
 
-// parseCreateRequest parses the JSON-encoded specifications from the gRPC request
+// parseCreateRequest deserialises the JSON-encoded fields of a CreateRequest into a
+// VMSpec. The following fields are parsed:
+//
+//   - req.ClassJson  — contracts.VMClass: CPU, MemoryMiB, Firmware, ExtraConfig
+//     (vsphere.hardwareVersion key), DiskDefaults, PerformanceProfile (nested virt,
+//     VBS, CPU/memory hot-add), SecurityProfile (SecureBoot, TPM, VT-d).
+//   - req.ImageJson  — contracts.VMImage: TemplateName (for template clones) or Path +
+//     Format (for imported-disk VMs). When Path is non-empty, disk-based creation is
+//     used and TemplateName is ignored.
+//   - req.NetworksJson — []contracts.NetworkAttachment: only the first element's
+//     NetworkName is used to attach a single network adapter.
+//   - req.UserData    — raw cloud-init user-data bytes.
+//   - req.MetaData    — raw cloud-init metadata bytes.
+//   - req.PlacementJson — contracts.Placement: optional per-VM overrides for Cluster,
+//     Datastore, StoragePod, Folder, and Host.
+//
+// Returns an error if any JSON field is present but cannot be unmarshalled.
 func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, error) {
 	spec := &VMSpec{
 		Name: req.Name,
@@ -1713,10 +2050,11 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 	// Parse Placement from JSON (contracts.Placement structure)
 	if req.PlacementJson != "" {
 		var placement struct {
-			Cluster   string `json:"Cluster"`
-			Datastore string `json:"Datastore"`
-			Folder    string `json:"Folder"`
-			Host      string `json:"Host"`
+			Cluster    string `json:"Cluster"`
+			Datastore  string `json:"Datastore"`
+			StoragePod string `json:"StoragePod"`
+			Folder     string `json:"Folder"`
+			Host       string `json:"Host"`
 		}
 
 		if err := json.Unmarshal([]byte(req.PlacementJson), &placement); err != nil {
@@ -1726,6 +2064,7 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 		// Set placement overrides if specified
 		spec.Cluster = placement.Cluster
 		spec.Datastore = placement.Datastore
+		spec.StoragePod = placement.StoragePod
 		spec.Folder = placement.Folder
 		spec.Host = placement.Host
 	}
@@ -1733,7 +2072,23 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 	return spec, nil
 }
 
-// createVirtualMachine creates a VM in vSphere using the parsed specification
+// createVirtualMachine provisions a new VM in vSphere according to spec and returns
+// the ManagedObjectReference value ("vm-N") of the created VM.
+//
+// Resource placement follows a priority chain for each dimension:
+//   - Cluster:   spec.Cluster → p.config.DefaultCluster
+//   - Datastore: spec.Datastore → StoragePod (spec.StoragePod or p.config.DefaultStoragePod) → p.config.DefaultDatastore
+//   - Folder:    spec.Folder   → p.config.DefaultFolder → datacenter default VM folder
+//
+// VM creation path:
+//   - If spec.DiskPath is set: CreateVM_Task with an attached existing VMDK and an LSI
+//     Logic SCSI controller added to DeviceChange.
+//   - Otherwise: CloneVM_Task from the template named spec.TemplateName.
+//
+// In both cases, cloud-init data (if provided) is embedded via addCloudInitToConfigSpec
+// before the task is submitted so that guestinfo properties are set at creation time.
+// After the task completes, the primary disk is optionally grown via resizeVMDisk and
+// the VM is powered on.
 func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (string, error) {
 	p.logger.Info("Creating virtual machine",
 		"name", spec.Name,
@@ -1785,17 +2140,31 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		return "", fmt.Errorf("failed to get resource pool from cluster: %w", err)
 	}
 
-	// Determine which datastore to use (spec override or provider default)
-	datastoreName := p.config.DefaultDatastore
+	// Determine which datastore to use (spec override, StoragePod, or provider default)
+	var datastore *object.Datastore
 	if spec.Datastore != "" {
-		datastoreName = spec.Datastore
-		p.logger.Info("Using placement override for datastore", "datastore", datastoreName)
-	}
-
-	// Find the datastore
-	datastore, err := p.finder.Datastore(ctx, datastoreName)
-	if err != nil {
-		return "", fmt.Errorf("failed to find datastore '%s': %w", datastoreName, err)
+		p.logger.Info("Using placement override for datastore", "datastore", spec.Datastore)
+		datastore, err = p.finder.Datastore(ctx, spec.Datastore)
+		if err != nil {
+			return "", fmt.Errorf("failed to find datastore '%s': %w", spec.Datastore, err)
+		}
+	} else {
+		storagePodName := p.config.DefaultStoragePod
+		if spec.StoragePod != "" {
+			storagePodName = spec.StoragePod
+		}
+		if storagePodName != "" {
+			p.logger.Info("Resolving datastore from StoragePod", "storagePod", storagePodName)
+			datastore, err = p.resolveDatastoreFromStoragePod(ctx, storagePodName)
+			if err != nil {
+				return "", fmt.Errorf("failed to resolve datastore from StoragePod '%s': %w", storagePodName, err)
+			}
+		} else {
+			datastore, err = p.finder.Datastore(ctx, p.config.DefaultDatastore)
+			if err != nil {
+				return "", fmt.Errorf("failed to find datastore '%s': %w", p.config.DefaultDatastore, err)
+			}
+		}
 	}
 
 	// Determine which folder to use (spec override or provider default)
@@ -2147,7 +2516,13 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 	return vmID, nil
 }
 
-// resizeVMDisk resizes the primary disk of a VM to the specified size
+// resizeVMDisk expands the primary disk (first VirtualDisk device) of vm to targetSizeGB
+// gibibytes by issuing a ReconfigVM_Task with an edit device-change spec. The operation
+// is grow-only: if the current allocated size is already equal to or greater than
+// targetSizeGB the method returns nil without modifying the VM. Disk shrinks are not
+// supported by the vSphere API and are silently skipped.
+//
+// vmID is used only for structured log messages and has no effect on the operation.
 func (p *Provider) resizeVMDisk(ctx context.Context, vm *object.VirtualMachine, targetSizeGB int64, vmID string) error {
 	p.logger.Info("Resizing VM disk", "vm_id", vmID, "target_size_gb", targetSizeGB)
 
@@ -2218,7 +2593,24 @@ func (p *Provider) resizeVMDisk(ctx context.Context, vm *object.VirtualMachine, 
 	return nil
 }
 
-// GetDiskInfo retrieves detailed information about a VM's disk
+// GetDiskInfo implements the ProviderServer interface. It retrieves metadata about a
+// specific virtual disk attached to the VM identified by req.VmId.
+//
+// Disk selection: req.DiskId is parsed as "disk-N" where N is the zero-based device
+// index among all VirtualDisk devices in hardware order. An empty DiskId defaults to
+// the primary disk (index 0).
+//
+// The response includes:
+//   - DiskId: the device label from DeviceInfo.
+//   - Format: always "vmdk" for vSphere.
+//   - VirtualSizeBytes / ActualSizeBytes: derived from CapacityInKB (actual size is
+//     approximated as equal to virtual size; querying the datastore for real allocation
+//     is not implemented).
+//   - Path: the datastore-qualified VMDK path from FlatVer2 backing.
+//   - BackingFile: parent-disk path when the VM has snapshots (delta-chain base).
+//   - IsBootable: true only for the first disk (index 0).
+//   - Snapshots: flat list of snapshot names from the VM snapshot tree.
+//   - Metadata: device key and SCSI unit number as string map entries.
 func (p *Provider) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoRequest) (*providerv1.GetDiskInfoResponse, error) {
 	if p.client == nil {
 		return nil, errors.NewUnavailable("vSphere client not configured", nil)
@@ -2315,7 +2707,8 @@ func (p *Provider) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoR
 	return response, nil
 }
 
-// extractSnapshotNames recursively extracts snapshot names from snapshot tree
+// extractSnapshotNames performs a depth-first traversal of snapshotTree and returns a
+// flat slice of all snapshot Name fields, including those of nested child snapshots.
 func (p *Provider) extractSnapshotNames(snapshotTree []types.VirtualMachineSnapshotTree) []string {
 	var names []string
 	for _, snapshot := range snapshotTree {
@@ -2327,7 +2720,25 @@ func (p *Provider) extractSnapshotNames(snapshotTree []types.VirtualMachineSnaps
 	return names
 }
 
-// ExportDisk exports a VM disk for migration
+// ExportDisk implements the ProviderServer interface. It exports a virtual disk from
+// vSphere storage and writes the result to the PVC-backed storage URL specified in
+// req.DestinationUrl (format: "pvc://<pvc-name>/<file-path>").
+//
+// The export pipeline is:
+//  1. GetDiskInfo to resolve the source disk path. If the VM has snapshots, the base
+//     (parent) backing disk is used instead of the delta disk.
+//  2. VirtualDiskManager.CopyVirtualDisk clones the source VMDK to a temporary
+//     sparseMonolithic VMDK on the same datastore. This normalises the format and
+//     produces a single downloadable file regardless of the original VMDK subtype.
+//  3. DatastoreFileManager.DownloadFile transfers the temporary VMDK to a local temp
+//     directory. If the descriptor references extent files they are downloaded as well.
+//  4. If req.Format is not "vmdk", diskutil/qemu-img converts the downloaded VMDK to
+//     the requested format ("qcow2" or "raw"). Supported formats: "vmdk", "qcow2", "raw".
+//  5. The final file is uploaded to the destination PVC storage via the storage client.
+//  6. Temporary local files and the temporary datastore VMDK are cleaned up via deferred
+//     calls regardless of success or failure.
+//
+// The operation runs synchronously; Task in the response is nil.
 func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
 	if p.client == nil {
 		return nil, errors.NewUnavailable("vSphere client not configured", nil)
@@ -2593,7 +3004,24 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	return response, nil
 }
 
-// ImportDisk imports a disk from an external source
+// ImportDisk implements the ProviderServer interface. It downloads a virtual disk from
+// PVC-backed storage (req.SourceUrl, format: "pvc://<pvc-name>/<file-path>") and
+// uploads it to a vSphere datastore so that it can be attached to a VM via Create.
+//
+// The import pipeline is:
+//  1. Determine the target datastore: req.StorageHint if set, otherwise
+//     p.config.DefaultDatastore.
+//  2. Download the disk file from PVC storage to a local temp file, optionally
+//     verifying the checksum (req.VerifyChecksum / req.ExpectedChecksum).
+//  3. If req.Format is not "vmdk", diskutil/qemu-img converts the downloaded file to
+//     VMDK format (thin, stream-optimised). Supported source formats: "qcow2", "raw".
+//  4. DatastoreFileManager.UploadFile transfers the VMDK to the datastore at the path
+//     "[<datastore>] <diskID>/<diskID>.vmdk".
+//  5. Temporary local files are cleaned up via deferred os.Remove calls.
+//
+// The ImportDiskResponse.Path contains the fully-qualified datastore VMDK path to be
+// passed as VMImage.Path in a subsequent Create request. The operation runs
+// synchronously; Task in the response is nil.
 func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
 	if p.client == nil {
 		return nil, errors.NewUnavailable("vSphere client not configured", nil)
@@ -2766,7 +3194,19 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	return response, nil
 }
 
-// ListVMs returns all VMs managed by this provider
+// ListVMs implements the ProviderServer interface. It enumerates every virtual machine
+// in the default datacenter using the govmomi Finder and returns summary information
+// for each one.
+//
+// For each VM the following information is collected via the property collector:
+//   - Name, CPU count, memory size (MB), power state.
+//   - IP addresses (filtered by isValidIPAddress; duplicates removed).
+//   - Disk devices: ID (device key), datastore path, size in GiB, format ("vmdk").
+//   - Network adapters: MAC address and portgroup/network name.
+//   - ProviderRaw map: vm_id (same as Name), power_state, guest_os.
+//
+// VMs for which property retrieval fails are skipped with a warning log rather than
+// aborting the entire list operation.
 func (p *Provider) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) (*providerv1.ListVMsResponse, error) {
 	if p.client == nil {
 		return nil, fmt.Errorf("vSphere client not configured")
