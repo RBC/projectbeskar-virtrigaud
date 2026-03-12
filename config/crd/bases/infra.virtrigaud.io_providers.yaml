@@ -111,7 +111,9 @@ spec:
                     maxLength: 255
                     type: string
                   datastore:
-                    description: Datastore specifies the default datastore
+                    description: |-
+                      Datastore specifies the default datastore.
+                      Mutually exclusive with StoragePod; Datastore takes precedence if both are set.
                     maxLength: 255
                     type: string
                   folder:
@@ -124,6 +126,12 @@ spec:
                     type: string
                   resourcePool:
                     description: ResourcePool specifies the default resource pool
+                    maxLength: 255
+                    type: string
+                  storagePod:
+                    description: |-
+                      StoragePod specifies a vSphere Datastore Cluster (StoragePod) used as the default
+                      for automatic datastore selection when no explicit Datastore is specified.
                     maxLength: 255
                     type: string
                 type: object

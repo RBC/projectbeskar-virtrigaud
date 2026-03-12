@@ -277,16 +277,16 @@ release-sdk: ## Release SDK module with tags and generate docs
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
 	$(CONTAINER_TOOL) build --platform $(PLATFORM) -t ${CONTROLLER_IMG} \
-		--build-arg VERSION=$(VERSION) \
-		--build-arg GIT_SHA=$(GIT_SHA) \
-		--build-arg TARGETOS=$(shell echo $(PLATFORM) | cut -d'/' -f1) \
-		--build-arg TARGETARCH=$(shell echo $(PLATFORM) | cut -d'/' -f2) \
-		--build-arg BUILDER_IMAGE=$(BUILDER_IMAGE) \
-		--build-arg BASE_IMAGE=$(BASE_IMAGE) \
-		--build-arg GOPROXY=$(GOPROXY) \
-		--build-arg GOINSECURE=$(GOINSECURE) \
-		--build-arg GOPRIVATE=$(GOPRIVATE) \
-		--build-arg GOSUMDB=$(GOSUMDB) \
+		--build-arg VERSION="$(VERSION)" \
+		--build-arg GIT_SHA="$(GIT_SHA)" \
+		--build-arg TARGETOS="$(shell echo $(PLATFORM) | cut -d'/' -f1)" \
+		--build-arg TARGETARCH="$(shell echo $(PLATFORM) | cut -d'/' -f2)" \
+		--build-arg BUILDER_IMAGE="$(BUILDER_IMAGE)" \
+		--build-arg BASE_IMAGE="$(BASE_IMAGE)" \
+		--build-arg GOPROXY="$(GOPROXY)" \
+		--build-arg GOINSECURE="$(GOINSECURE)" \
+		--build-arg GOPRIVATE="$(GOPRIVATE)" \
+		--build-arg GOSUMDB="$(GOSUMDB)" \
 		.
 
 .PHONY: docker-build-multiplatform

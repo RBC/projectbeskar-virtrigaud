@@ -715,11 +715,20 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 	// Convert Placement
 	var placement *contracts.Placement
 	if vm.Spec.Placement != nil {
+		log.Info("Building placement from VM spec",
+			"vm", vm.Name,
+			"cluster", vm.Spec.Placement.Cluster,
+			"datastore", vm.Spec.Placement.Datastore,
+			"storagePod", vm.Spec.Placement.StoragePod,
+			"folder", vm.Spec.Placement.Folder)
 		placement = &contracts.Placement{
-			Datastore: vm.Spec.Placement.Datastore,
-			Cluster:   vm.Spec.Placement.Cluster,
-			Folder:    vm.Spec.Placement.Folder,
+			Datastore:  vm.Spec.Placement.Datastore,
+			StoragePod: vm.Spec.Placement.StoragePod,
+			Cluster:    vm.Spec.Placement.Cluster,
+			Folder:     vm.Spec.Placement.Folder,
 		}
+	} else {
+		log.Info("No placement specified in VM spec", "vm", vm.Name)
 	}
 
 	return contracts.CreateRequest{

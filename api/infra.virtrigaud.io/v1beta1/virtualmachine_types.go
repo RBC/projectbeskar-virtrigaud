@@ -497,9 +497,16 @@ type Placement struct {
 	// +optional
 	Host string `json:"host,omitempty"`
 
-	// Datastore specifies the target datastore
+	// Datastore specifies the target datastore.
+	// Mutually exclusive with StoragePod; Datastore takes precedence if both are set.
 	// +optional
 	Datastore string `json:"datastore,omitempty"`
+
+	// StoragePod specifies a vSphere Datastore Cluster (StoragePod) to use for automatic
+	// datastore selection. The provider will pick the datastore within the cluster that
+	// has the most free space. Ignored when Datastore is also set.
+	// +optional
+	StoragePod string `json:"storagePod,omitempty"`
 
 	// Folder specifies the target folder
 	// +optional

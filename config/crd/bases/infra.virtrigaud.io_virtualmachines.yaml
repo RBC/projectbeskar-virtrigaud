@@ -394,7 +394,9 @@ spec:
                     description: Cluster specifies the target cluster
                     type: string
                   datastore:
-                    description: Datastore specifies the target datastore
+                    description: |-
+                      Datastore specifies the target datastore.
+                      Mutually exclusive with StoragePod; Datastore takes precedence if both are set.
                     type: string
                   folder:
                     description: Folder specifies the target folder
@@ -404,6 +406,12 @@ spec:
                     type: string
                   resourcePool:
                     description: ResourcePool specifies the target resource pool
+                    type: string
+                  storagePod:
+                    description: |-
+                      StoragePod specifies a vSphere Datastore Cluster (StoragePod) to use for automatic
+                      datastore selection. The provider will pick the datastore within the cluster that
+                      has the most free space. Ignored when Datastore is also set.
                     type: string
                 type: object
               placementRef:

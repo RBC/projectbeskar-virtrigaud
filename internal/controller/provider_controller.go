@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -114,9 +115,23 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		provider.Status.LastHealthCheck = &now
 	}
 
-	// Update provider status
+	// Update provider status with retry on conflict
 	provider.Status.ObservedGeneration = provider.Generation
-	if updateErr := r.Status().Update(ctx, &provider); updateErr != nil {
+	updateErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Get the latest version
+		latest := &infravirtrigaudiov1beta1.Provider{}
+		if err := r.Get(ctx, types.NamespacedName{Name: provider.Name, Namespace: provider.Namespace}, latest); err != nil {
+			return err
+		}
+
+		// Update status fields
+		latest.Status = provider.Status
+
+		// Try to update
+		return r.Status().Update(ctx, latest)
+	})
+
+	if updateErr != nil {
 		logger.Error(updateErr, "Failed to update Provider status")
 		if err == nil {
 			err = updateErr
@@ -376,11 +391,23 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 		return nil, fmt.Errorf("failed to get deployment: %w", err)
 	}
 
-	// Update existing deployment if needed
-	existing.Spec.Replicas = &replicas
-	existing.Spec.Template = desired.Spec.Template
-	existing.Labels = desired.Labels
-	if err := r.Update(ctx, existing); err != nil {
+	// Update existing deployment with retry on conflict
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Get the latest version
+		if err := r.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: provider.Namespace}, existing); err != nil {
+			return err
+		}
+
+		// Update fields
+		existing.Spec.Replicas = &replicas
+		existing.Spec.Template = desired.Spec.Template
+		existing.Labels = desired.Labels
+
+		// Try to update
+		return r.Update(ctx, existing)
+	})
+
+	if err != nil {
 		return nil, fmt.Errorf("failed to update deployment: %w", err)
 	}
 
@@ -465,6 +492,35 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 		})
 	}
 
+	// Add provider defaults as environment variables (for vSphere provider)
+	if provider.Spec.Defaults.Datastore != "" {
+		env = append(env, corev1.EnvVar{
+			Name:  "PROVIDER_DEFAULT_DATASTORE",
+			Value: provider.Spec.Defaults.Datastore,
+		})
+	}
+
+	if provider.Spec.Defaults.StoragePod != "" {
+		env = append(env, corev1.EnvVar{
+			Name:  "PROVIDER_DEFAULT_STORAGE_POD",
+			Value: provider.Spec.Defaults.StoragePod,
+		})
+	}
+
+	if provider.Spec.Defaults.Cluster != "" {
+		env = append(env, corev1.EnvVar{
+			Name:  "PROVIDER_DEFAULT_CLUSTER",
+			Value: provider.Spec.Defaults.Cluster,
+		})
+	}
+
+	if provider.Spec.Defaults.Folder != "" {
+		env = append(env, corev1.EnvVar{
+			Name:  "PROVIDER_DEFAULT_FOLDER",
+			Value: provider.Spec.Defaults.Folder,
+		})
+	}
+
 	// Add custom environment variables
 	if provider.Spec.Runtime.Env != nil {
 		env = append(env, provider.Spec.Runtime.Env...)
@@ -520,10 +576,16 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 		grpcPort = provider.Spec.Runtime.Service.Port
 	}
 
+	// Determine image pull policy
+	imagePullPolicy := corev1.PullIfNotPresent
+	if provider.Spec.Runtime.ImagePullPolicy != "" {
+		imagePullPolicy = provider.Spec.Runtime.ImagePullPolicy
+	}
+
 	container := &corev1.Container{
 		Name:            "provider",
 		Image:           image,
-		ImagePullPolicy: corev1.PullIfNotPresent,
+		ImagePullPolicy: imagePullPolicy,
 		Args: []string{
 			fmt.Sprintf("--port=%d", grpcPort),
 			"--health-port=8080",
