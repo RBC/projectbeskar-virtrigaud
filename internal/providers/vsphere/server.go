@@ -2174,6 +2174,7 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		"config.DefaultDatastore", p.config.DefaultDatastore,
 		"vm_name", spec.Name)
 
+
 	if spec.Datastore != "" {
 		p.logger.Info("Using placement override for datastore", "datastore", spec.Datastore)
 		datastore, err = p.finder.Datastore(ctx, spec.Datastore)
