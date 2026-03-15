@@ -37,6 +37,7 @@
 - [Resilience](RESILIENCE.md)
 - [Upgrade Guide](UPGRADE.md)
 - [vSphere Hardware Versions](VSPHERE_HARDWARE_VERSION.md)
+- [vSphere Datastore Clusters (StoragePod)](VSPHERE_STORAGEPOD.md)
 
 # Security Configuration
 

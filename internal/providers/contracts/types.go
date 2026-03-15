@@ -112,6 +112,8 @@ type MetaData struct {
 type Placement struct {
 	// Datastore specifies preferred datastore
 	Datastore string
+	// StoragePod specifies a vSphere Datastore Cluster for automatic datastore selection
+	StoragePod string
 	// Cluster specifies preferred cluster
 	Cluster string
 	// Folder specifies preferred folder
