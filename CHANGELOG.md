@@ -5,6 +5,240 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-03-17 22:10] - Add SCSI Controller Configuration for Additional Disks
+**Author:** @firestoned (Erick Bourgeois)
+
+### Added
+- `api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go`: New `SCSIControllerSpec` type for SCSI controller configuration
+  - `controller`: Specify SCSI bus number (0-3) for the disk
+  - `sharedBus`: Configure bus sharing mode (noSharing, virtualSharing, physicalSharing)
+  - `controllerType`: Select controller type (lsilogic, buslogic, lsilogic-sas, pvscsi)
+- `api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go`: Added optional `SCSI` field to `DiskSpec`
+- `internal/providers/vsphere/server.go`: New `createSCSIController()` function to create SCSI controllers dynamically
+- `internal/providers/vsphere/server.go`: Enhanced `attachAdditionalDisk()` to support multiple SCSI controllers
+  - Automatically creates new SCSI controllers if specified controller doesn't exist
+  - Tracks controllers by bus number for precise disk placement
+  - Supports up to 4 SCSI controllers (bus 0-3) with 15 disks each (60 disks total)
+
+### Changed
+- `internal/providers/vsphere/server.go`: `AdditionalDiskSpec` now includes SCSI configuration fields
+- `internal/providers/vsphere/server.go`: `parseCreateRequest()` parses SCSI configuration from DisksJson
+- `internal/providers/vsphere/server.go`: Disk attachment logic refactored to support controller selection
+
+### Why
+Users need to attach disks to specific SCSI controllers with custom configurations
+(e.g., pvscsi with virtualSharing for RDM disks, or separate controllers for different
+disk types). Previously, all disks were attached to the first available SCSI controller
+(bus 0), limiting flexibility for advanced storage configurations.
+
+### Usage
+```yaml
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: multi-controller-vm
+spec:
+  classRef:
+    name: large
+  imageRef:
+    name: rhel9-template
+  providerRef:
+    name: vsphere
+  disks:
+    # Disks on default controller (bus 0)
+    - name: data-disk-1
+      sizeGiB: 100
+      type: thin
+
+    # Disks on dedicated pvscsi controller (bus 1)
+    - name: db-disk-1
+      sizeGiB: 500
+      type: eagerzeroedthick
+      scsi:
+        controller: 1
+        controllerType: pvscsi
+        sharedBus: noSharing
+
+    - name: db-disk-2
+      sizeGiB: 500
+      type: eagerzeroedthick
+      scsi:
+        controller: 1  # Same controller as db-disk-1
+```
+
+This automatically creates SCSI controller 1 (pvscsi, noSharing) if it doesn't exist,
+then attaches both db disks to it.
+
+### Impact
+- [ ] Breaking change
+- [x] New feature - SCSI controller configuration
+- [ ] Requires cluster rollout
+- [x] CRD update required - includes new `scsi` field in DiskSpec
+
+## [2026-03-17 21:55] - Add 'vm' ShortName Alias for VirtualMachine CRD
+**Author:** @firestoned (Erick Bourgeois)
+
+### Added
+- `api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go`: Added `+kubebuilder:resource:shortName=vm` marker
+- `config/crd/bases/infra.virtrigaud.io_virtualmachines.yaml`: Generated CRD now includes `vm` as a shortName
+
+### Changed
+- VirtualMachine CRD now supports `kubectl get vm` as an alias for `kubectl get virtualmachines`
+
+### Why
+Users frequently need to query VirtualMachines and typing `virtualmachines` is verbose. Following
+Kubernetes conventions (like `po` for pods, `svc` for services), adding a `vm` shortName improves
+user experience and command-line efficiency.
+
+### Usage
+After applying the updated CRD:
+```bash
+kubectl get vm              # Instead of kubectl get virtualmachines
+kubectl get vm -A           # List all VMs across namespaces
+kubectl describe vm foo     # Describe a specific VM
+kubectl delete vm bar       # Delete a VM
+```
+
+### Impact
+- [ ] Breaking change
+- [x] CRD update required - run `kubectl apply -f config/crd/bases/infra.virtrigaud.io_virtualmachines.yaml`
+- [ ] Requires cluster rollout
+- [ ] Config change only
+
+## [2026-03-17 21:30] - Fix Datastore Name Resolution for Additional Disks
+**Author:** @firestoned (Erick Bourgeois)
+
+### Fixed
+- `internal/providers/vsphere/server.go`: Additional disk attachment failing with "Invalid configuration for device '0'"
+  - Issue: `resolveDatastoreFromStoragePod()` returned `object.NewDatastore()` which doesn't populate the Name property
+  - When `datastore.Name()` was called in `attachAdditionalDisk()`, it returned empty string
+  - Resulted in invalid disk path: `[] vm-name/disk.vmdk` instead of `[datastore-name] vm-name/disk.vmdk`
+  - Fixed by using `p.finder.Datastore(ctx, best.Name)` which properly fetches datastore with all properties
+
+### Why
+Additional disks specified in VirtualMachine `spec.disks` were being parsed and attachment was attempted,
+but all attachments failed with "Invalid configuration for device '0'" because the datastore path was malformed.
+The datastore name was empty in the path string, causing vSphere to reject the disk configuration.
+
+### Impact
+- [x] Bug fix - additional disks can now attach successfully
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+
+## [2026-03-17 19:00] - Add Comprehensive Disk Debugging and VM Existence Check
+**Author:** @firestoned (Erick Bourgeois)
+
+### Added
+- `internal/controller/virtualmachine_controller.go`: Verbose-level logging for disk configuration
+  - Logs count and details of all additional disks being sent to provider using `log.V(1).Info()`
+  - Logs image source resolution details (Libvirt, vSphere, Proxmox) at verbose level
+  - Helps identify if disk specs are properly reaching the create request
+- `internal/transport/grpc/client.go`: Debug output for DisksJson transmission
+  - Prints DisksJson being sent over gRPC to provider
+  - Useful for troubleshooting marshaling issues
+- `internal/providers/vsphere/server.go`: VM existence check before creation
+  - Checks if VM already exists before attempting creation
+  - Returns existing VM ID if found, avoiding "name already exists" errors
+  - Useful for recovering from failed creation attempts
+
+### Changed
+- `internal/providers/vsphere/server.go`: Enhanced debug-level logging throughout disk operations
+  - Logs DisksJson receipt in Create method using `p.logger.Debug()`
+  - Logs parsed VMSpec with disk count using Debug log level
+  - Detailed per-disk logging during attachment with index, name, size, and type
+  - Separate logging for success (Debug) vs failure (Error) of each disk attachment
+  - Uses proper slog Debug/Error methods
+- `internal/controller/virtualmachine_controller.go`: Uses logr verbose logging pattern
+  - Converted debug logging from `log.Info("DEBUG ...")` to proper `log.V(1).Info()`
+  - Follows controller-runtime's logging conventions for verbose/debug output
+  - Verbose logs only appear when log level is set to 1 or higher
+
+### Why
+Users were experiencing "name already exists" errors when VM creation failed mid-process,
+leaving a partially-created VM that blocked subsequent reconciliation attempts. Additionally,
+there was insufficient visibility into whether disk specifications were being properly
+transmitted and processed through the controller → gRPC → provider pipeline.
+
+Debug logging was using Info level with "DEBUG" prefix strings, which made logs noisy and
+couldn't be controlled by log level settings. Now uses proper debug/verbose logging that
+can be enabled/disabled via log level configuration.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] Debugging improvements - better error recovery and visibility
+- [ ] Config change only
+
+**To enable verbose logging:**
+- Controller: Set `--zap-log-level=1` or higher
+- Provider: Uses slog Debug level (enabled via LOG_LEVEL=debug environment variable)
+
+---
+
+## [2026-03-17 16:00] - Implement Additional Disks Support in vSphere Provider
+**Author:** @firestoned (Erick Bourgeois)
+
+### Added
+- `internal/providers/vsphere/server.go`: Complete support for additional disks beyond root disk
+  - Added `AdditionalDisks` field to `VMSpec` struct to store additional disk specifications
+  - Added `AdditionalDiskSpec` type to define disk name, size, and provisioning type
+  - Implemented `attachAdditionalDisk()` helper function to attach disks to existing VMs
+  - Added parsing of `DisksJson` from gRPC CreateRequest in `parseCreateRequest()`
+  - Integrated disk attachment logic into `createVirtualMachine()` workflow
+
+### Changed
+- `internal/providers/vsphere/server.go`: Additional disks now attached after root disk resize, before power-on
+  - Automatically finds available SCSI controller slots (unit numbers 0-15, excluding 7)
+  - Supports thin, thick, and eager-zeroed-thick provisioning types
+  - Creates disk files with naming convention: `vm-name_N.vmdk` (N = disk index)
+  - Logs detailed information about each disk attachment operation
+
+### Fixed
+- **CRITICAL BUG**: `spec.disks` in VirtualMachine CRD was completely ignored by vSphere provider
+  - DisksJson was sent via gRPC but never parsed by the provider
+  - Users could specify additional disks in YAML but they were silently not created
+  - Now all disks specified in `spec.disks` are properly created and attached
+
+### Why
+The VirtualMachine CRD has always supported additional disks via `spec.disks` (up to 20 disks),
+but the vSphere provider implementation was incomplete. DisksJson was marshaled and sent by the
+controller, transmitted via gRPC, but never parsed or acted upon by the provider. This meant:
+- VMs were created with only the root disk (from VMClass.DiskDefaults)
+- Additional storage requirements were silently ignored
+- No error or warning was generated, making it appear the feature worked
+
+This fix completes the implementation by parsing DisksJson and attaching each specified disk
+to the VM using vSphere's Reconfigure API after VM creation.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] Feature completion - additional disks now work as documented
+- [ ] Config change only
+
+**Example Usage:**
+```yaml
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: database-server
+spec:
+  classRef:
+    name: standard  # Root disk from class defaults (e.g., 20GB)
+  disks:
+    - name: data-disk
+      sizeGiB: 100
+      type: thin
+    - name: logs-disk
+      sizeGiB: 50
+      type: thick
+```
+
+Result: VM will have 3 disks (root + 2 additional) attached to SCSI controller.
+
+---
+
 ## [2026-01-21 18:00] - Align MetaData Structure with UserData Pattern
 **Author:** @firestoned (Erick Bourgeois)
 
@@ -484,7 +718,7 @@ Updated provider images are available from GitHub Container Registry:
 
 ---
 
-## [0.2.3] - 2025-10-13 
+## [0.2.3] - 2025-10-13
 
 ### Added
 
@@ -541,7 +775,7 @@ Updated provider images are available from GitHub Container Registry:
   - Full clone and linked clone support via `fullClone` parameter
   - Proper storage pool selection during clone operation
   - Clone task monitoring with async operation support
-- **Intelligent Boot Order Configuration**: 
+- **Intelligent Boot Order Configuration**:
   - Auto-detection of primary boot disk from cloned template
   - Support for multiple disk types: scsi, virtio, sata, ide
   - Automatic boot order generation (e.g., `boot=order=scsi0;ide2`)
@@ -630,11 +864,11 @@ Updated provider images are available from GitHub Container Registry:
 
 #### Nested Virtualization Support
 - **VMClass PerformanceProfile**: Added `nestedVirtualization` field to enable nested virtualization capabilities in VMs, allowing VMs to run their own hypervisors and nested virtual machines
-- **vSphere Provider Implementation**: 
+- **vSphere Provider Implementation**:
   - Automatically configures `vhv.enable=TRUE` for hardware-assisted virtualization
   - Enables `vhv.allowNestedPageTables=TRUE` for improved nested VM performance
   - Compatible with VM hardware version 9+ (version 14+ recommended)
-- **LibVirt Provider Implementation**: 
+- **LibVirt Provider Implementation**:
   - Configures CPU mode with required virtualization extensions (vmx for Intel VT-x, svm for AMD-V)
   - Automatically passes through host CPU virtualization features to guest VMs
   - Compatible with QEMU/KVM hypervisors with nested virtualization enabled
@@ -643,19 +877,19 @@ Updated provider images are available from GitHub Container Registry:
 - **Virtualization Based Security**: Added `virtualizationBasedSecurity` field in PerformanceProfile for Windows VBS features
 
 #### Security Features
-- **TPM (Trusted Platform Module) Support**: 
+- **TPM (Trusted Platform Module) Support**:
   - Added `tpmEnabled` and `tpmVersion` fields in VMClass SecurityProfile
   - vSphere Provider: Full TPM 2.0 device support (requires vSphere 6.7+ and VM hardware version 14+)
   - LibVirt Provider: TPM emulator support with tpm-tis model and version 2.0
   - Automatically enforces UEFI firmware requirement when TPM is enabled
   - Enables Windows 11 support and BitLocker encryption capabilities
-- **Secure Boot Support**: 
+- **Secure Boot Support**:
   - Added `secureBoot` field in SecurityProfile for UEFI Secure Boot functionality
   - vSphere Provider: Configures EFI Secure Boot through VM boot options
   - LibVirt Provider: Uses OVMF firmware with Secure Boot capabilities
   - Automatically forces UEFI firmware when enabled
   - Protects against rootkits and bootkits at firmware level
-- **Comprehensive Documentation**: 
+- **Comprehensive Documentation**:
   - Added `docs/NESTED_VIRTUALIZATION.md` with detailed configuration guide
   - Added `docs/examples/nested-virtualization.yaml` with complete working examples
   - Includes verification steps, troubleshooting guidance, and performance recommendations
@@ -1017,4 +1251,3 @@ The Proxmox provider now has full CRD integration for template-based VM deployme
 - Troubleshooting guides for common issues
 
 **Impact**: The Proxmox provider now has feature parity with vSphere and LibVirt providers, enabling production-ready VM management on Proxmox VE clusters via Kubernetes CRDs.
-

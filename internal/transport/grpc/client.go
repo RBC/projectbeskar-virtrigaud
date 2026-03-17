@@ -531,6 +531,10 @@ func (c *Client) convertCreateRequest(req contracts.CreateRequest) (*providerv1.
 
 	if disksData, err := json.Marshal(req.Disks); err == nil {
 		grpcReq.DisksJson = string(disksData)
+		if len(req.Disks) > 0 {
+			fmt.Printf("gRPC Client: DisksJson being sent to provider: disk_count=%d disks_json=%s\n",
+				len(req.Disks), string(disksData))
+		}
 	}
 
 	if req.Placement != nil {

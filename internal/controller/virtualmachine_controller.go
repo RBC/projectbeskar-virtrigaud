@@ -446,13 +446,13 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 	usingImportedDisk := vm.Spec.ImportedDisk != nil
 
 	if usingImportedDisk {
-		log.Info("DEBUG buildCreateRequest called with imported disk",
+		log.V(1).Info("buildCreateRequest called with imported disk",
 			"vm", vm.Name,
 			"diskID", vm.Spec.ImportedDisk.DiskID,
 			"format", vm.Spec.ImportedDisk.Format,
 			"source", vm.Spec.ImportedDisk.Source)
 	} else if vmImage != nil {
-		log.Info("DEBUG buildCreateRequest called with vmImage template",
+		log.V(1).Info("buildCreateRequest called with vmImage template",
 			"vm", vm.Name,
 			"vmImage", vmImage.Name,
 			"hasLibvirtSource", vmImage.Spec.Source.Libvirt != nil,
@@ -599,7 +599,7 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 		}
 
 		if vmImage.Spec.Source.Libvirt != nil {
-			log.Info("DEBUG controller: Libvirt image source found",
+			log.V(1).Info("Libvirt image source found",
 				"path", vmImage.Spec.Source.Libvirt.Path,
 				"url", vmImage.Spec.Source.Libvirt.URL,
 				"format", vmImage.Spec.Source.Libvirt.Format)
@@ -612,31 +612,31 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 			if vmImage.Spec.Source.Libvirt.ChecksumType != "" {
 				image.ChecksumType = string(vmImage.Spec.Source.Libvirt.ChecksumType)
 			}
-			log.Info("DEBUG controller: Set image from Libvirt source",
+			log.V(1).Info("Set image from Libvirt source",
 				"image.Path", image.Path,
 				"image.URL", image.URL,
 				"image.Format", image.Format)
 		} else {
-			log.Info("DEBUG controller: Libvirt image source is nil")
+			log.V(1).Info("Libvirt image source is nil")
 		}
 
 		if vmImage.Spec.Source.Proxmox != nil {
-			log.Info("DEBUG controller: Proxmox image source found",
+			log.V(1).Info("Proxmox image source found",
 				"templateID", vmImage.Spec.Source.Proxmox.TemplateID,
 				"templateName", vmImage.Spec.Source.Proxmox.TemplateName)
 
 			if vmImage.Spec.Source.Proxmox.TemplateID != nil {
 				image.TemplateName = fmt.Sprintf("%d", *vmImage.Spec.Source.Proxmox.TemplateID)
-				log.Info("DEBUG controller: Set TemplateName from TemplateID",
+				log.V(1).Info("Set TemplateName from TemplateID",
 					"templateID", *vmImage.Spec.Source.Proxmox.TemplateID,
 					"image.TemplateName", image.TemplateName)
 			} else if vmImage.Spec.Source.Proxmox.TemplateName != "" {
 				image.TemplateName = vmImage.Spec.Source.Proxmox.TemplateName
-				log.Info("DEBUG controller: Set TemplateName from TemplateName",
+				log.V(1).Info("Set TemplateName from TemplateName",
 					"image.TemplateName", image.TemplateName)
 			}
 		} else {
-			log.Info("DEBUG controller: Proxmox image source is nil")
+			log.V(1).Info("Proxmox image source is nil")
 		}
 	}
 
@@ -687,6 +687,15 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 			Type:    diskSpec.Type,
 			Name:    diskSpec.Name,
 		})
+	}
+
+	if len(disks) > 0 {
+		log.V(1).Info("Additional disks configured",
+			"vm", vm.Name,
+			"disk_count", len(disks),
+			"disks", disks)
+	} else {
+		log.V(1).Info("No additional disks configured", "vm", vm.Name)
 	}
 
 	// Convert UserData
