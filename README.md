@@ -35,7 +35,7 @@ VirtRigaud uses a **Remote Provider** architecture for optimal scalability and r
 ### Key Benefits
 
 - **Scalability**: Each provider runs as independent pods with dedicated resources
-- **Reliability**: Provider failures don't affect the manager or other providers  
+- **Reliability**: Provider failures don't affect the manager or other providers
 - **Security**: Provider credentials are isolated to their respective pods
 - **Flexibility**: Scale providers independently based on workload demands
 - **Maintainability**: Update providers without affecting the core manager
@@ -48,7 +48,7 @@ VirtRigaud uses a **Remote Provider** architecture for optimal scalability and r
 graph TB
     %% Kubernetes Cluster boundary
     subgraph "Kubernetes Cluster"
-        
+
         %% CRDs
         subgraph "Custom Resources"
             VM[VirtualMachine CRD]
@@ -57,47 +57,47 @@ graph TB
             PR[Provider CRD]
             VMNA[VMNetworkAttachment CRD]
         end
-        
+
         %% Controller
         CTRL[VirtRigaud Controller<br/>Manager]
-        
+
         %% Remote Providers
         subgraph "Remote Providers (gRPC)"
             VSP[vSphere Provider<br/>Pod]
-            LVP[Libvirt Provider<br/>Pod] 
+            LVP[Libvirt Provider<br/>Pod]
             PXP[Proxmox Provider<br/>Pod]
         end
-        
+
         %% Connections within cluster
         VM -.-> CTRL
         VMC -.-> CTRL
         VMI -.-> CTRL
         PR -.-> CTRL
         VMNA -.-> CTRL
-        
+
         CTRL -->|gRPC/TLS| VSP
         CTRL -->|gRPC/TLS| LVP
         CTRL -->|gRPC/TLS| PXP
     end
-    
+
     %% External Infrastructure
     subgraph "External Infrastructure"
         subgraph "vSphere Environment"
             VCENTER[vCenter Server]
             ESXI[ESXi Hosts]
         end
-        
+
         subgraph "KVM Environment"
             LIBVIRT[Libvirt Hosts]
             QEMU[QEMU/KVM VMs]
         end
-        
+
         subgraph "Proxmox Environment"
             PVE[Proxmox VE Cluster]
             NODES[PVE Nodes]
         end
     end
-    
+
     %% External connections
     VSP -->|govmomi API| VCENTER
     LVP -->|libvirt API| LIBVIRT
@@ -123,26 +123,26 @@ graph TB
      --set providers.vsphere.enabled=false \
      --set providers.libvirt.enabled=false \
      --set providers.proxmox.enabled=false
-   
+
    # Or simply install with default values (all providers disabled by default in future versions)
    helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud-system --create-namespace
-   
+
    # To disable automatic CRD upgrades:
    helm install virtrigaud virtrigaud/virtrigaud \
      -n virtrigaud-system --create-namespace \
      --set crdUpgrade.enabled=false
    ```
-   
+
    > **Important**: Do not enable providers via Helm flags. Instead, create Provider CRs (see step 1 in "Using VirtRigaud" below) which automatically deploy provider pods with proper credential management.
 
 3. **Verify the installation**:
    ```bash
    # Check pods
    kubectl get pods -n virtrigaud-system
-   
+
    # Check CRDs
    kubectl get crd | grep virtrigaud
-   
+
    # Verify CRD upgrade job completed (if enabled)
    kubectl get jobs -n virtrigaud-system -l app.kubernetes.io/component=crd-upgrade
    ```
@@ -151,10 +151,10 @@ graph TB
    ```bash
    # Standard upgrade - CRDs are automatically updated
    helm upgrade virtrigaud virtrigaud/virtrigaud -n virtrigaud-system
-   
+
    # The chart uses Helm hooks to apply CRDs during upgrade
    # No manual CRD management needed!
-   
+
    # To upgrade provider images, update the Provider CR's spec.runtime.image field:
    kubectl patch provider <provider-name> -n <namespace> --type=merge \
      -p '{"spec":{"runtime":{"image":"ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.3.0"}}}'
@@ -177,18 +177,18 @@ graph TB
 1. **Create a Provider** (one-time setup per hypervisor):
 
    First, create a credentials secret in the namespace where you'll create the Provider:
-   
+
    ```bash
    # For Libvirt (SSH authentication)
    kubectl create secret generic libvirt-creds -n default \
      --from-literal=username=your-ssh-username \
      --from-literal=password='your-ssh-password'
-   
+
    # Or with SSH key (recommended)
    kubectl create secret generic libvirt-creds -n default \
      --from-literal=username=your-ssh-username \
      --from-file=ssh-privatekey=~/.ssh/id_rsa
-   
+
    # For vSphere
    kubectl create secret generic vsphere-creds -n default \
      --from-literal=username=administrator@vsphere.local \
@@ -244,31 +244,31 @@ graph TB
    > 2. Mounts the credentials secret specified in `credentialSecretRef`
    > 3. Creates a Service for the provider pod
    > 4. The provider pod connects to your hypervisor using the mounted credentials
-   > 
+   >
    > Each Provider CR gets its own isolated provider deployment with its own credentials. This is more secure than shared multi-tenant providers. See [Remote Provider Documentation](docs/REMOTE_PROVIDERS.md#configuration-flow-provider-resource--provider-pod) for details.
 
 2. **Create VM resources using the Provider**:
    ```bash
    # Apply VM definition that references the provider
-   kubectl apply -f docs/examples/complete-example.yaml
-   
+   kubectl apply -f examples/complete-example.yaml
+
    # Proxmox VE example (v1beta1 API)
-   kubectl apply -f docs/examples/proxmox-complete-example.yaml
-   
+   kubectl apply -f examples/proxmox-complete-example.yaml
+
    # Only v1beta1 API is supported as of v0.2.1
-   
+
    # Multi-provider example (vSphere, Libvirt, and Proxmox)
-   kubectl apply -f docs/examples/multi-provider-example.yaml
-   
+   kubectl apply -f examples/multi-provider-example.yaml
+
    # Or step by step:
    kubectl create secret generic vsphere-creds \
      --from-literal=username=administrator@vsphere.local \
      --from-literal=password=your-password
-   kubectl apply -f docs/examples/provider-vsphere.yaml
-   kubectl apply -f docs/examples/vmclass-small.yaml
-   kubectl apply -f docs/examples/vmimage-ubuntu.yaml
-   kubectl apply -f docs/examples/vmnetwork-app.yaml
-   kubectl apply -f docs/examples/vm-ubuntu-small.yaml
+   kubectl apply -f examples/provider-vsphere.yaml
+   kubectl apply -f examples/vmclass-small.yaml
+   kubectl apply -f examples/vmimage-ubuntu.yaml
+   kubectl apply -f examples/vmnetwork-app.yaml
+   kubectl apply -f examples/vm-ubuntu-small.yaml
    ```
 
 2. **Monitor VM creation**:
@@ -276,7 +276,7 @@ graph TB
    kubectl get virtualmachine -w
    ```
 
-For detailed instructions, see [Quick Start Guide](docs/getting-started/quickstart.md).
+For detailed instructions, see [Quick Start Guide](https://virtrigaud.io/getting-started/).
 
 ## CRDs
 
@@ -306,10 +306,10 @@ For detailed instructions, see [Quick Start Guide](docs/getting-started/quicksta
   - Cloud-init support via guestinfo
   - Network configuration with portgroups
   - Snapshot management with memory state
-  
+
 - **Libvirt/KVM** - **Production Ready**
   - VM creation from qcow2 images
-  - Power management (On/Off/Reboot)  
+  - Power management (On/Off/Reboot)
   - Resource configuration (CPU/Memory/Disks)
   - **Reconfiguration** (CPU/Memory/Disk - requires VM restart)
   - **VNC console URLs** for remote VM access
@@ -392,7 +392,7 @@ VM migrations require intermediate storage for transferring VM disk images. Virt
 #### Prerequisites
 
 1. **StorageClass with ReadWriteMany (RWX) Access**
-   
+
    You need a StorageClass that supports `ReadWriteMany` access mode, allowing multiple provider pods to access the migration storage simultaneously. Common options include:
 
    - **NFS-based storage** (nfs-subdir-external-provisioner, NFS CSI driver)
@@ -454,7 +454,7 @@ spec:
       storageClassName: nfs-migration-storage
       size: 100Gi
       accessMode: ReadWriteMany  # Required for multi-provider access
-      
+
       # Option 2: Use existing PVC
       # name: existing-migration-pvc
 ```
@@ -557,21 +557,11 @@ make run
 
 ## Documentation
 
-- [Quick Start Guide](docs/getting-started/quickstart.md) - Get started in 15 minutes
-- [CRD Reference](docs/CRDs.md) - Complete API documentation
-- [Examples](docs/EXAMPLES.md) - Practical examples and use cases
-- [CLI Tools Reference](docs/CLI.md) - Command-line interface guide
-- [Upgrade Guide](docs/UPGRADE.md) - Version upgrade procedures
-- [Provider Development](docs/PROVIDERS.md) - How to add new hypervisors
-- [Provider Catalog](docs/catalog.md) - Browse available providers
-- [Provider Tutorial](docs/providers/tutorial.md) - Complete provider development guide
-- [Versioning & Breaking Changes](docs/providers/versioning.md)
+Please see our official documentation site [virtrigaud.io](https://virtrigaud.io)
 
 ### Provider-Specific Documentation
 
-- [vSphere Provider](docs/providers/vsphere.md) - vCenter/ESXi integration
-- [Libvirt Provider](docs/providers/libvirt.md) - KVM/QEMU virtualization  
-- [Proxmox VE Provider](docs/providers/proxmox.md) - Proxmox Virtual Environment
+Provider specific [documentation](https://virtrigaud.io/guides/).
 
 ## Contributing
 
