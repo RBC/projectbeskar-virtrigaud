@@ -396,6 +396,32 @@ type DiskSpec struct {
 	// StorageClass specifies the storage class (optional)
 	// +optional
 	StorageClass string `json:"storageClass,omitempty"`
+
+	// SCSI specifies SCSI controller configuration (vSphere only)
+	// +optional
+	SCSI *SCSIControllerSpec `json:"scsi,omitempty"`
+}
+
+// SCSIControllerSpec defines SCSI controller configuration for vSphere
+type SCSIControllerSpec struct {
+	// Controller specifies the SCSI controller bus number (0-3)
+	// If not specified, uses the first available controller
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=3
+	Controller *int32 `json:"controller,omitempty"`
+
+	// SharedBus specifies the SCSI bus sharing mode
+	// +optional
+	// +kubebuilder:default="noSharing"
+	// +kubebuilder:validation:Enum=noSharing;virtualSharing;physicalSharing
+	SharedBus string `json:"sharedBus,omitempty"`
+
+	// ControllerType specifies the SCSI controller type
+	// +optional
+	// +kubebuilder:default="pvscsi"
+	// +kubebuilder:validation:Enum=lsilogic;buslogic;lsilogic-sas;pvscsi
+	ControllerType string `json:"controllerType,omitempty"`
 }
 
 // ImportedDiskRef references a disk that was imported via migration or other means.
@@ -532,6 +558,7 @@ const (
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
 //+kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas
+//+kubebuilder:resource:shortName=vm
 //+kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 //+kubebuilder:printcolumn:name="Provider",type=string,JSONPath=`.spec.providerRef.name`
 //+kubebuilder:printcolumn:name="Class",type=string,JSONPath=`.spec.classRef.name`

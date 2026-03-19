@@ -11,6 +11,8 @@ spec:
     kind: VirtualMachine
     listKind: VirtualMachineList
     plural: virtualmachines
+    shortNames:
+    - vm
     singular: virtualmachine
   scope: Namespaced
   versions:
@@ -93,6 +95,37 @@ spec:
                       maxLength: 63
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
+                    scsi:
+                      description: SCSI specifies SCSI controller configuration (vSphere
+                        only)
+                      properties:
+                        controller:
+                          description: |-
+                            Controller specifies the SCSI controller bus number (0-3)
+                            If not specified, uses the first available controller
+                          format: int32
+                          maximum: 3
+                          minimum: 0
+                          type: integer
+                        controllerType:
+                          default: pvscsi
+                          description: ControllerType specifies the SCSI controller
+                            type
+                          enum:
+                          - lsilogic
+                          - buslogic
+                          - lsilogic-sas
+                          - pvscsi
+                          type: string
+                        sharedBus:
+                          default: noSharing
+                          description: SharedBus specifies the SCSI bus sharing mode
+                          enum:
+                          - noSharing
+                          - virtualSharing
+                          - physicalSharing
+                          type: string
+                      type: object
                     sizeGiB:
                       description: SizeGiB is the size of the disk in GiB
                       format: int32

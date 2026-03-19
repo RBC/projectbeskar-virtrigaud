@@ -256,7 +256,9 @@ func (p *Provider) resolveDatastoreFromStoragePod(ctx context.Context, storagePo
 		"datastore", best.Name,
 		"freeSpaceGiB", best.Summary.FreeSpace/1024/1024/1024,
 	)
-	return object.NewDatastore(p.client.Client, best.Reference()), nil
+
+	// Use finder to get the datastore by name so that properties like Name() are populated
+	return p.finder.Datastore(ctx, best.Name)
 }
 
 // selectBestDatastoreByFreeSpace performs a linear scan over datastores and returns the
@@ -398,10 +400,48 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 		return nil, fmt.Errorf("vSphere client not configured")
 	}
 
+	p.logger.Debug("Create called",
+		"vm_name", req.Name,
+		"has_disks_json", req.DisksJson != "",
+		"disks_json_length", len(req.DisksJson))
+
+	if req.DisksJson != "" {
+		p.logger.Debug("DisksJson received", "disks_json", req.DisksJson)
+	}
+
 	// Parse the JSON specifications to understand what to create
 	vmSpec, err := p.parseCreateRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse create request: %w", err)
+	}
+
+	p.logger.Debug("Parsed VMSpec",
+		"vm_name", vmSpec.Name,
+		"additional_disks_count", len(vmSpec.AdditionalDisks))
+
+	if len(vmSpec.AdditionalDisks) > 0 {
+		for i, disk := range vmSpec.AdditionalDisks {
+			p.logger.Debug("Additional disk",
+				"index", i,
+				"name", disk.Name,
+				"size_gib", disk.SizeGiB,
+				"type", disk.Type)
+		}
+	}
+
+	// Check if VM already exists
+	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	if err == nil {
+		p.finder.SetDatacenter(datacenter)
+		existingVM, _ := p.finder.VirtualMachine(ctx, vmSpec.Name)
+		if existingVM != nil {
+			p.logger.Warn("VM already exists, will attempt to use existing VM",
+				"vm_name", vmSpec.Name,
+				"vm_ref", existingVM.Reference().Value)
+			return &providerv1.CreateResponse{
+				Id: existingVM.Reference().Value,
+			}, nil
+		}
 	}
 
 	// Create the VM using govmomi
@@ -1892,12 +1932,24 @@ type VMSpec struct {
 	SecureBoot                  bool   // Enable secure boot
 	TPMEnabled                  bool   // Enable TPM
 	VTDEnabled                  bool   // Enable Intel VT-d or AMD-Vi
+	// Additional disks beyond the root disk
+	AdditionalDisks []AdditionalDiskSpec
 	// Placement overrides
 	Cluster    string // Cluster override (empty = use provider default)
 	Datastore  string // Datastore override (empty = use provider default)
 	StoragePod string // Datastore Cluster override (empty = use provider default; ignored when Datastore is set)
 	Folder     string // Folder override (empty = use provider default)
 	Host       string // Host override (empty = use provider default)
+}
+
+// AdditionalDiskSpec defines an additional disk to attach to a VM
+type AdditionalDiskSpec struct {
+	Name               string
+	SizeGiB            int32
+	Type               string
+	SCSIController     *int32 // SCSI controller bus number (0-3), nil = auto-select
+	SCSISharedBus      string // SCSI bus sharing: noSharing, virtualSharing, physicalSharing
+	SCSIControllerType string // SCSI controller type: lsilogic, buslogic, lsilogic-sas, pvscsi
 }
 
 // parseCreateRequest deserialises the JSON-encoded fields of a CreateRequest into a
@@ -1915,6 +1967,7 @@ type VMSpec struct {
 //   - req.MetaData    — raw cloud-init metadata bytes.
 //   - req.PlacementJson — contracts.Placement: optional per-VM overrides for Cluster,
 //     Datastore, StoragePod, Folder, and Host.
+//   - req.DisksJson — []contracts.DiskSpec: additional disks to attach beyond the root disk.
 //
 // Returns an error if any JSON field is present but cannot be unmarshalled.
 func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, error) {
@@ -2077,13 +2130,51 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 		spec.Host = placement.Host
 	}
 
+	// Parse Disks from JSON ([]contracts.DiskSpec structure)
+	if req.DisksJson != "" {
+		var disks []struct {
+			Name string `json:"Name"`
+			SizeGiB int32  `json:"SizeGiB"`
+			Type    string `json:"Type"`
+			SCSI    *struct {
+				Controller     *int32 `json:"controller"`
+				SharedBus      string `json:"sharedBus"`
+				ControllerType string `json:"controllerType"`
+			} `json:"SCSI"`
+		}
+
+		if err := json.Unmarshal([]byte(req.DisksJson), &disks); err != nil {
+			return nil, fmt.Errorf("failed to parse Disks JSON: %w", err)
+		}
+
+		p.logger.Info("Parsed additional disks", "count", len(disks), "vm_name", spec.Name)
+
+		for _, disk := range disks {
+			diskSpec := AdditionalDiskSpec{
+				Name:    disk.Name,
+				SizeGiB: disk.SizeGiB,
+				Type:    disk.Type,
+			}
+
+			// Parse SCSI controller configuration if provided
+			if disk.SCSI != nil {
+				diskSpec.SCSIController = disk.SCSI.Controller
+				diskSpec.SCSISharedBus = disk.SCSI.SharedBus
+				diskSpec.SCSIControllerType = disk.SCSI.ControllerType
+			}
+
+			spec.AdditionalDisks = append(spec.AdditionalDisks, diskSpec)
+		}
+	}
+
 	p.logger.Info("Finished parseCreateRequest",
 		"name", spec.Name,
 		"cluster", spec.Cluster,
 		"datastore", spec.Datastore,
 		"storagePod", spec.StoragePod,
 		"folder", spec.Folder,
-		"host", spec.Host)
+		"host", spec.Host,
+		"additional_disks", len(spec.AdditionalDisks))
 
 	return spec, nil
 }
@@ -2529,6 +2620,39 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		}
 	}
 
+	// Attach additional disks if specified
+	if len(spec.AdditionalDisks) > 0 {
+		p.logger.Debug("Starting additional disk attachment",
+			"vm_id", vmID,
+			"count", len(spec.AdditionalDisks))
+
+		for i, diskSpec := range spec.AdditionalDisks {
+			p.logger.Debug("Attaching disk",
+				"vm_id", vmID,
+				"disk_index", i+1,
+				"disk_name", diskSpec.Name,
+				"size_gib", diskSpec.SizeGiB,
+				"type", diskSpec.Type)
+
+			if err := p.attachAdditionalDisk(ctx, newVM, diskSpec, datacenter, datastore, i+1); err != nil {
+				p.logger.Error("Failed to attach additional disk",
+					"vm_id", vmID,
+					"disk_name", diskSpec.Name,
+					"disk_index", i+1,
+					"error", err)
+				// Continue with remaining disks rather than failing entire creation
+			} else {
+				p.logger.Debug("Successfully attached additional disk",
+					"vm_id", vmID,
+					"disk_name", diskSpec.Name,
+					"disk_index", i+1,
+					"size_gb", diskSpec.SizeGiB)
+			}
+		}
+	} else {
+		p.logger.Debug("No additional disks to attach", "vm_id", vmID)
+	}
+
 	// Power on the VM if requested (VirtualMachine spec.powerState: "On")
 	// Note: This is a simple implementation - in production you might want to check the actual powerState from the request
 	powerTask, err := newVM.PowerOn(ctx)
@@ -2545,6 +2669,342 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 	}
 
 	return vmID, nil
+}
+
+// attachAdditionalDisk attaches a new disk to an existing VM
+func (p *Provider) attachAdditionalDisk(
+	ctx context.Context,
+	vm *object.VirtualMachine,
+	diskSpec AdditionalDiskSpec,
+	datacenter *object.Datacenter,
+	datastore *object.Datastore,
+	diskIndex int,
+) error {
+	p.logger.Info("Attaching additional disk",
+		"disk_name", diskSpec.Name,
+		"size_gb", diskSpec.SizeGiB,
+		"type", diskSpec.Type,
+		"disk_index", diskIndex,
+		"scsi_controller", diskSpec.SCSIController,
+		"scsi_type", diskSpec.SCSIControllerType,
+		"scsi_shared_bus", diskSpec.SCSISharedBus)
+
+	// Get current VM configuration to find available controller and unit number
+	var vmMo mo.VirtualMachine
+	err := vm.Properties(ctx, vm.Reference(), []string{"config.hardware.device", "config.name"}, &vmMo)
+	if err != nil {
+		return fmt.Errorf("failed to get VM properties: %w", err)
+	}
+
+	// Find SCSI controllers indexed by bus number
+	scsiControllers := make(map[int32]types.BaseVirtualSCSIController)
+	controllerKeys := make(map[int32]int32) // busNumber -> controllerKey
+	usedUnitNumbers := make(map[int32]map[int32]bool) // controllerKey -> unitNumber -> used
+
+	for _, device := range vmMo.Config.Hardware.Device {
+		if scsiCtrl, ok := device.(types.BaseVirtualSCSIController); ok {
+			ctrl := scsiCtrl.GetVirtualSCSIController()
+			busNumber := ctrl.BusNumber
+			scsiControllers[busNumber] = scsiCtrl
+			controllerKeys[busNumber] = ctrl.Key
+			usedUnitNumbers[ctrl.Key] = make(map[int32]bool)
+		}
+	}
+
+	// Track used unit numbers for each controller
+	for _, device := range vmMo.Config.Hardware.Device {
+		if disk, ok := device.(*types.VirtualDisk); ok {
+			if disk.UnitNumber != nil {
+				if units, exists := usedUnitNumbers[disk.ControllerKey]; exists {
+					units[*disk.UnitNumber] = true
+				}
+			}
+		}
+	}
+
+	// Determine which controller to use
+	var targetControllerKey int32
+	var targetBusNumber int32
+	var needsNewController bool
+
+	if diskSpec.SCSIController != nil {
+		// Specific controller requested
+		targetBusNumber = *diskSpec.SCSIController
+		if key, exists := controllerKeys[targetBusNumber]; exists {
+			// Controller exists
+			targetControllerKey = key
+			p.logger.Debug("Using existing SCSI controller",
+				"bus_number", targetBusNumber,
+				"controller_key", targetControllerKey)
+		} else {
+			// Need to create new controller
+			needsNewController = true
+			p.logger.Info("Need to create new SCSI controller",
+				"bus_number", targetBusNumber,
+				"type", diskSpec.SCSIControllerType,
+				"shared_bus", diskSpec.SCSISharedBus)
+		}
+	} else {
+		// Auto-select: Use first available SCSI controller
+		if len(scsiControllers) == 0 {
+			return fmt.Errorf("no SCSI controller found in VM")
+		}
+		// Get first controller (bus 0)
+		if key, exists := controllerKeys[0]; exists {
+			targetControllerKey = key
+			targetBusNumber = 0
+		} else {
+			return fmt.Errorf("no SCSI controller found on bus 0")
+		}
+	}
+
+	// Create new SCSI controller if needed
+	if needsNewController {
+		newKey, err := p.createSCSIController(ctx, vm, targetBusNumber, diskSpec.SCSIControllerType, diskSpec.SCSISharedBus)
+		if err != nil {
+			return fmt.Errorf("failed to create SCSI controller: %w", err)
+		}
+		targetControllerKey = newKey
+		usedUnitNumbers[newKey] = make(map[int32]bool)
+		p.logger.Info("Created new SCSI controller",
+			"bus_number", targetBusNumber,
+			"controller_key", newKey)
+	}
+
+	// Find next available unit number on target controller (0-15, but 7 is reserved)
+	var unitNumber int32 = -1
+	units := usedUnitNumbers[targetControllerKey]
+	for i := int32(0); i < 16; i++ {
+		if i == 7 {
+			continue // Reserved for SCSI controller itself
+		}
+		if !units[i] {
+			unitNumber = i
+			break
+		}
+	}
+
+	if unitNumber == -1 {
+		return fmt.Errorf("no available unit numbers on SCSI controller (all 15 slots used)")
+	}
+
+	// Construct datastore path for new disk
+	// Format: [datastore] vm-name/vm-name_N.vmdk
+	vmName := vmMo.Config.Name
+	diskFileName := fmt.Sprintf("%s_%d.vmdk", vmName, diskIndex)
+	diskPath := fmt.Sprintf("[%s] %s/%s", datastore.Name(), vmName, diskFileName)
+
+	p.logger.Info("Creating disk file",
+		"path", diskPath,
+		"unit_number", unitNumber,
+		"controller_key", targetControllerKey)
+
+	// Determine disk backing type from spec
+	var diskMode string = string(types.VirtualDiskModePersistent)
+	var thinProvisioned *bool
+
+	switch strings.ToLower(diskSpec.Type) {
+	case "thin":
+		thin := true
+		thinProvisioned = &thin
+	case "thick", "eagerzeroedthick":
+		thick := false
+		thinProvisioned = &thick
+	default:
+		// Default to thin provisioning
+		thin := true
+		thinProvisioned = &thin
+	}
+
+	// Create disk backing
+	diskBacking := &types.VirtualDiskFlatVer2BackingInfo{
+		VirtualDeviceFileBackingInfo: types.VirtualDeviceFileBackingInfo{
+			FileName:  diskPath,
+			Datastore: types.NewReference(datastore.Reference()),
+		},
+		DiskMode:        diskMode,
+		ThinProvisioned: thinProvisioned,
+	}
+
+	// For eager zeroed thick, set the flag
+	if strings.ToLower(diskSpec.Type) == "eagerzeroedthick" {
+		eagerScrub := true
+		diskBacking.EagerlyScrub = &eagerScrub
+	}
+
+	// Create the disk device
+	diskDevice := &types.VirtualDisk{
+		VirtualDevice: types.VirtualDevice{
+			Key:           -1, // Auto-assign
+			ControllerKey: targetControllerKey,
+			UnitNumber:    &unitNumber,
+			Backing:       diskBacking,
+			DeviceInfo: &types.Description{
+				Label:   diskSpec.Name,
+				Summary: fmt.Sprintf("%d GB disk", diskSpec.SizeGiB),
+			},
+		},
+		CapacityInKB: int64(diskSpec.SizeGiB) * 1024 * 1024, // Convert GiB to KB
+	}
+
+	// Create device change spec
+	deviceSpec := &types.VirtualDeviceConfigSpec{
+		Operation:     types.VirtualDeviceConfigSpecOperationAdd,
+		FileOperation: types.VirtualDeviceConfigSpecFileOperationCreate,
+		Device:        diskDevice,
+	}
+
+	// Create reconfigure spec
+	configSpec := &types.VirtualMachineConfigSpec{
+		DeviceChange: []types.BaseVirtualDeviceConfigSpec{deviceSpec},
+	}
+
+	// Perform the reconfiguration to add the disk
+	task, err := vm.Reconfigure(ctx, *configSpec)
+	if err != nil {
+		return fmt.Errorf("failed to start disk attachment task: %w", err)
+	}
+
+	// Wait for reconfiguration to complete
+	_, err = task.WaitForResult(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("disk attachment task failed: %w", err)
+	}
+
+	p.logger.Info("Disk attached successfully",
+		"disk_name", diskSpec.Name,
+		"path", diskPath,
+		"size_gb", diskSpec.SizeGiB)
+
+	return nil
+}
+
+// createSCSIController creates a new SCSI controller on the VM
+func (p *Provider) createSCSIController(
+	ctx context.Context,
+	vm *object.VirtualMachine,
+	busNumber int32,
+	controllerType string,
+	sharedBus string,
+) (int32, error) {
+	// Set defaults
+	if controllerType == "" {
+		controllerType = "pvscsi"
+	}
+	if sharedBus == "" {
+		sharedBus = "noSharing"
+	}
+
+	// Create appropriate controller type
+	var controller types.BaseVirtualDevice
+
+	switch strings.ToLower(controllerType) {
+	case "pvscsi":
+		ctrl := &types.ParaVirtualSCSIController{
+			VirtualSCSIController: types.VirtualSCSIController{
+				SharedBus: types.VirtualSCSISharing(sharedBus),
+				VirtualController: types.VirtualController{
+					BusNumber: busNumber,
+					VirtualDevice: types.VirtualDevice{
+						Key: -1, // Auto-assign key
+					},
+				},
+			},
+		}
+		controller = ctrl
+	case "lsilogic":
+		ctrl := &types.VirtualLsiLogicController{
+			VirtualSCSIController: types.VirtualSCSIController{
+				SharedBus: types.VirtualSCSISharing(sharedBus),
+				VirtualController: types.VirtualController{
+					BusNumber: busNumber,
+					VirtualDevice: types.VirtualDevice{
+						Key: -1,
+					},
+				},
+			},
+		}
+		controller = ctrl
+	case "lsilogic-sas":
+		ctrl := &types.VirtualLsiLogicSASController{
+			VirtualSCSIController: types.VirtualSCSIController{
+				SharedBus: types.VirtualSCSISharing(sharedBus),
+				VirtualController: types.VirtualController{
+					BusNumber: busNumber,
+					VirtualDevice: types.VirtualDevice{
+						Key: -1,
+					},
+				},
+			},
+		}
+		controller = ctrl
+	case "buslogic":
+		ctrl := &types.VirtualBusLogicController{
+			VirtualSCSIController: types.VirtualSCSIController{
+				SharedBus: types.VirtualSCSISharing(sharedBus),
+				VirtualController: types.VirtualController{
+					BusNumber: busNumber,
+					VirtualDevice: types.VirtualDevice{
+						Key: -1,
+					},
+				},
+			},
+		}
+		controller = ctrl
+	default:
+		return 0, fmt.Errorf("unsupported SCSI controller type: %s", controllerType)
+	}
+
+	// Create device change spec
+	deviceSpec := &types.VirtualDeviceConfigSpec{
+		Operation: types.VirtualDeviceConfigSpecOperationAdd,
+		Device:    controller,
+	}
+
+	// Create reconfigure spec
+	configSpec := &types.VirtualMachineConfigSpec{
+		DeviceChange: []types.BaseVirtualDeviceConfigSpec{deviceSpec},
+	}
+
+	p.logger.Info("Creating SCSI controller",
+		"bus_number", busNumber,
+		"type", controllerType,
+		"shared_bus", sharedBus)
+
+	// Perform the reconfiguration
+	task, err := vm.Reconfigure(ctx, *configSpec)
+	if err != nil {
+		return 0, fmt.Errorf("failed to start controller creation task: %w", err)
+	}
+
+	// Wait for reconfiguration to complete
+	_, err = task.WaitForResult(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("controller creation task failed: %w", err)
+	}
+
+	// Extract the new controller key from the result
+	// The key should be in the result, but we need to query the VM to get it
+	var vmMo mo.VirtualMachine
+	if err := vm.Properties(ctx, vm.Reference(), []string{"config.hardware.device"}, &vmMo); err != nil {
+		return 0, fmt.Errorf("failed to get VM properties after controller creation: %w", err)
+	}
+
+	// Find the newly created controller by bus number
+	for _, device := range vmMo.Config.Hardware.Device {
+		if scsiCtrl, ok := device.(types.BaseVirtualSCSIController); ok {
+			ctrl := scsiCtrl.GetVirtualSCSIController()
+			if ctrl.BusNumber == busNumber {
+				p.logger.Info("SCSI controller created successfully",
+					"bus_number", busNumber,
+					"controller_key", ctrl.Key,
+					"type", controllerType)
+				return ctrl.Key, nil
+			}
+		}
+	}
+
+	return 0, fmt.Errorf("failed to find newly created SCSI controller (bus %d)", busNumber)
 }
 
 // resizeVMDisk expands the primary disk (first VirtualDisk device) of vm to targetSizeGB

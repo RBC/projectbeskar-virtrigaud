@@ -1,0 +1,160 @@
+---
+# Example: VM with multiple SCSI controllers and configured disks
+# This demonstrates how to create a VM with disks on different SCSI controllers
+# with custom controller types and sharing configurations
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: database-server
+  namespace: production
+  labels:
+    app: postgres
+    tier: database
+spec:
+  providerRef:
+    name: vsphere-prod
+  classRef:
+    name: database-xlarge
+  imageRef:
+    name: rhel9-postgres-template
+
+  # Network configuration
+  networks:
+    - name: db-network
+      networkRef:
+        name: production-db-vlan
+
+  # Disk configuration with multiple SCSI controllers
+  disks:
+    # Data disk on default SCSI controller (bus 0)
+    # Uses the existing controller from the template
+    - name: app-data
+      sizeGiB: 200
+      type: thin
+
+    # Database disks on dedicated pvscsi controller (bus 1)
+    # Controller will be automatically created with pvscsi type
+    - name: postgres-data-1
+      sizeGiB: 1000
+      type: eagerzeroedthick
+      scsi:
+        controller: 1
+        controllerType: pvscsi
+        sharedBus: noSharing
+
+    - name: postgres-data-2
+      sizeGiB: 1000
+      type: eagerzeroedthick
+      scsi:
+        controller: 1  # Same controller as postgres-data-1
+        controllerType: pvscsi
+        sharedBus: noSharing
+
+    # WAL/log disks on separate controller (bus 2) for I/O isolation
+    - name: postgres-wal
+      sizeGiB: 500
+      type: thin
+      scsi:
+        controller: 2
+        controllerType: pvscsi
+        sharedBus: noSharing
+
+    - name: postgres-logs
+      sizeGiB: 100
+      type: thin
+      scsi:
+        controller: 2
+        controllerType: pvscsi
+        sharedBus: noSharing
+
+  powerState: "On"
+
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        packages:
+          - open-vm-tools
+
+        # Format and mount the data disks
+        disk_setup:
+          /dev/sdb:  # app-data
+            table_type: gpt
+            layout: true
+          /dev/sdc:  # postgres-data-1
+            table_type: gpt
+            layout: true
+          /dev/sdd:  # postgres-data-2
+            table_type: gpt
+            layout: true
+          /dev/sde:  # postgres-wal
+            table_type: gpt
+            layout: true
+          /dev/sdf:  # postgres-logs
+            table_type: gpt
+            layout: true
+
+        fs_setup:
+          - device: /dev/sdb1
+            filesystem: xfs
+            label: app-data
+          - device: /dev/sdc1
+            filesystem: xfs
+            label: pg-data-1
+          - device: /dev/sdd1
+            filesystem: xfs
+            label: pg-data-2
+          - device: /dev/sde1
+            filesystem: xfs
+            label: pg-wal
+          - device: /dev/sdf1
+            filesystem: xfs
+            label: pg-logs
+
+        mounts:
+          - [LABEL=app-data, /var/app, xfs, "defaults,noatime", "0", "2"]
+          - [LABEL=pg-data-1, /var/lib/postgresql/data1, xfs, "defaults,noatime", "0", "2"]
+          - [LABEL=pg-data-2, /var/lib/postgresql/data2, xfs, "defaults,noatime", "0", "2"]
+          - [LABEL=pg-wal, /var/lib/postgresql/wal, xfs, "defaults,noatime", "0", "2"]
+          - [LABEL=pg-logs, /var/log/postgresql, xfs, "defaults,noatime", "0", "2"]
+
+---
+# Example: VM with shared SCSI bus for clustered storage (MSCS)
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: cluster-node-1
+  namespace: production
+spec:
+  providerRef:
+    name: vsphere-prod
+  classRef:
+    name: medium
+  imageRef:
+    name: windows-2022-template
+
+  disks:
+    # Local OS cache disk
+    - name: cache-disk
+      sizeGiB: 100
+      type: thin
+
+    # Shared disk for cluster quorum (virtualSharing for VMware HA)
+    - name: cluster-quorum
+      sizeGiB: 10
+      type: eagerzeroedthick
+      scsi:
+        controller: 1
+        controllerType: pvscsi
+        sharedBus: virtualSharing
+
+    # Shared data disk for clustered application
+    - name: cluster-data
+      sizeGiB: 500
+      type: eagerzeroedthick
+      scsi:
+        controller: 1
+        controllerType: pvscsi
+        sharedBus: virtualSharing
+
+  powerState: "On"
